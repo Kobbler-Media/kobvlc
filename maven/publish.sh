@@ -12,6 +12,7 @@ ARTIFACT_DIR="${GROUP//.//}/$ARTIFACT"
 [ -f "$WORK/maven/$ARTIFACT_DIR/$VERSION/$ARTIFACT-$VERSION.aar" ] ||
   { echo "nothing built for $VERSION; run android/build.sh first" >&2; exit 1; }
 
+ssh "$MAVEN_HOST" "mkdir -p '$MAVEN_DIR/$ARTIFACT_DIR'"
 rsync -a "$WORK/maven/$ARTIFACT_DIR/$VERSION" "$MAVEN_HOST:$MAVEN_DIR/$ARTIFACT_DIR/"
 
 ssh "$MAVEN_HOST" "cd '$MAVEN_DIR/$ARTIFACT_DIR' && ls -1t | tail -n +3 | xargs -r rm -rf && ls -1t"
