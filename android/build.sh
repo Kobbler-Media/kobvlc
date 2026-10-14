@@ -74,6 +74,8 @@ mkdir -p "$OUT"
 cp "$JNI/libvlc/build/outputs/aar/libvlc-release.aar" "$OUT/$ARTIFACT-$VERSION.aar"
 sed -e "s/@GROUP@/$GROUP/" -e "s/@ARTIFACT@/$ARTIFACT/" -e "s/@VERSION@/$VERSION/" \
   "$ROOT/android/pom.xml.in" > "$OUT/$ARTIFACT-$VERSION.pom"
+sed -e "s/@GROUP@/$GROUP/" -e "s/@ARTIFACT@/$ARTIFACT/" -e "s/@VERSION@/$VERSION/" \
+  "$ROOT/android/ivy.xml.in" > "$OUT/ivy-$VERSION.xml"
 (cd "$OUT" && for f in *.aar *.pom; do sha1sum "$f" | cut -d' ' -f1 > "$f.sha1"; done)
 
 echo "built $GROUP:$ARTIFACT:$VERSION ($(du -h "$OUT/$ARTIFACT-$VERSION.aar" | cut -f1)) for ${ABIS[*]}"

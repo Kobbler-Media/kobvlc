@@ -50,8 +50,10 @@ Bump `VERSION` in `versions.env` for every change that ships, then:
 android/build.sh && maven/publish.sh
 ```
 
-`publish.sh` copies the version to the Maven host and keeps only the newest two there.
-The host serves `maven/data` with `maven/compose.yml` (`docker compose up -d` from `maven/`).
+`publish.sh` attaches the AAR and an Ivy descriptor to a GitHub release `v<version>`,
+which is where kobapp resolves it from — anywhere, CI included — and copies the version to
+the LAN Maven host, which keeps only the newest two. The host serves `maven/data` with
+`maven/compose.yml` (`docker compose up -d` from `maven/`).
 
 ## Following VideoLAN
 

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ivy-module version="2.0">
+  <info organisation="@GROUP@" module="@ARTIFACT@" revision="@VERSION@"/>
+  <publications>
+    <artifact name="@ARTIFACT@" type="aar" ext="aar"/>
+  </publications>
+  <dependencies>
+    <dependency org="androidx.annotation" name="annotation" rev="1.3.0"/>
+    <dependency org="androidx.legacy" name="legacy-support-v4" rev="1.0.0"/>
+  </dependencies>
+</ivy-module>
