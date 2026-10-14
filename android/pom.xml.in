@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>@GROUP@</groupId>
+  <artifactId>@ARTIFACT@</artifactId>
+  <version>@VERSION@</version>
+  <packaging>aar</packaging>
+  <name>libvlc for kobbler</name>
+  <description>VideoLAN's LibVLC for Android with kobbler's patches, trimmed to playback</description>
+  <url>https://github.com/Kobbler-Media/kobvlc</url>
+  <licenses>
+    <license>
+      <name>GNU Lesser General Public License, version 2.1</name>
+      <url>https://www.gnu.org/licenses/old-licenses/lgpl-2.1.en.html</url>
+    </license>
+  </licenses>
+  <dependencies>
+    <dependency>
+      <groupId>androidx.annotation</groupId>
+      <artifactId>annotation</artifactId>
+      <version>1.3.0</version>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>androidx.legacy</groupId>
+      <artifactId>legacy-support-v4</artifactId>
+      <version>1.0.0</version>
+      <scope>compile</scope>
+    </dependency>
+  </dependencies>
+</project>

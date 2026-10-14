@@ -1,0 +1,63 @@
+From 52e038c5f69a174a14b611d02741e7a2d9f6cc9f Mon Sep 17 00:00:00 2001
+Message-Id: <52e038c5f69a174a14b611d02741e7a2d9f6cc9f.1791968979.git.dev@kobbler.invalid>
+In-Reply-To: <e59704e78605d362e0ab11cd7a4a72cbdffaf542.1791968979.git.dev@kobbler.invalid>
+References: <e59704e78605d362e0ab11cd7a4a72cbdffaf542.1791968979.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Wed, 14 Oct 2026 19:47:08 +1100
+Subject: [PATCH 2/3] http: file: stop the old transfer before seeking
+
+A server that has already honoured a range request will honour the next
+one, so the response being replaced has nothing left to fall back to.
+Kept running until the new response arrives, it fills the connection
+with data that is never read, and on HTTP/2 the new response is queued
+behind all of it: over Wi-Fi a seek to the cues at the end of a Matroska
+file waited more than a second for its first byte.
+---
+ modules/access/http/file.c | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/modules/access/http/file.c b/modules/access/http/file.c
+index 17ff23f991..b45a7dd016 100644
+--- a/modules/access/http/file.c
++++ b/modules/access/http/file.c
+@@ -203,6 +203,18 @@ bool vlc_http_file_can_seek(struct vlc_http_resource *res)
+ 
+ int vlc_http_file_seek(struct vlc_http_resource *res, uintmax_t offset)
+ {
++    bool replacing = res->response != NULL;
++
++    /* A server that has already honoured a range will honour this one, so the
++     * old transfer has nothing left to fall back to. Left running until the new
++     * response arrives, it fills the connection with data nobody reads, and on
++     * HTTP/2 the new response queues behind all of it. */
++    if (replacing && vlc_http_msg_can_seek(res->response))
++    {
++        vlc_http_msg_destroy(res->response);
++        res->response = NULL;
++    }
++
+     struct vlc_http_msg *resp = vlc_http_res_open(res, &offset);
+     if (resp == NULL)
+         return -1;
+@@ -210,7 +222,7 @@ int vlc_http_file_seek(struct vlc_http_resource *res, uintmax_t offset)
+     struct vlc_http_file *file = (struct vlc_http_file *)res;
+ 
+     int status = vlc_http_msg_get_status(resp);
+-    if (res->response != NULL)
++    if (replacing)
+     {   /* Accept the new and ditch the old one if:
+          * - requested succeeded and range was accepted (206),
+          * - requested failed due to out-of-range (416),
+@@ -221,7 +233,8 @@ int vlc_http_file_seek(struct vlc_http_resource *res, uintmax_t offset)
+             vlc_http_msg_destroy(resp);
+             return -1;
+         }
+-        vlc_http_msg_destroy(res->response);
++        if (res->response != NULL)
++            vlc_http_msg_destroy(res->response);
+     }
+ 
+     res->response = resp;
+-- 
+2.56.0
+

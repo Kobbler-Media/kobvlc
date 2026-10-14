@@ -1,0 +1,9 @@
+# Serves work/maven as published by maven/publish.sh: static files, read-only.
+services:
+  maven:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    ports:
+      - "17900:80"
+    volumes:
+      - ./data:/usr/share/nginx/html:ro

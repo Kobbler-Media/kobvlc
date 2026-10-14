@@ -1,0 +1,190 @@
+From 6a65f2df2b40d993cbc8ba68ea1f952f5b52f405 Mon Sep 17 00:00:00 2001
+Message-Id: <6a65f2df2b40d993cbc8ba68ea1f952f5b52f405.1791968979.git.dev@kobbler.invalid>
+In-Reply-To: <e59704e78605d362e0ab11cd7a4a72cbdffaf542.1791968979.git.dev@kobbler.invalid>
+References: <e59704e78605d362e0ab11cd7a4a72cbdffaf542.1791968979.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Wed, 14 Oct 2026 19:47:08 +1100
+Subject: [PATCH 3/3] mediacodec: find the decoder without probing every codec
+
+Ask a codec for its capabilities only once it declares the MIME type:
+querying every codec on the device threw an exception for each that did
+not, and took several hundred milliseconds on slow devices. The answer
+cannot change for the life of the process, so cache it.
+---
+ modules/codec/omxil/mediacodec_jni.c | 137 +++++++++++++++++++--------
+ 1 file changed, 98 insertions(+), 39 deletions(-)
+
+diff --git a/modules/codec/omxil/mediacodec_jni.c b/modules/codec/omxil/mediacodec_jni.c
+index 5be03b6c3e..0de1d0249d 100644
+--- a/modules/codec/omxil/mediacodec_jni.c
++++ b/modules/codec/omxil/mediacodec_jni.c
+@@ -244,8 +244,8 @@ end:
+ /*****************************************************************************
+  * MediaCodec_GetName
+  *****************************************************************************/
+-char* MediaCodec_GetName(vlc_object_t *p_obj, vlc_fourcc_t codec,
+-                         const char *psz_mime, int profile, int *p_quirks)
++static char* ScanCodecs(vlc_object_t *p_obj, vlc_fourcc_t codec,
++                        const char *psz_mime, int profile, int *p_quirks)
+ {
+     JNIEnv *env;
+     int num_codecs;
+@@ -292,6 +292,21 @@ char* MediaCodec_GetName(vlc_object_t *p_obj, vlc_fourcc_t codec,
+         if ((*env)->CallBooleanMethod(env, info, jfields.is_encoder))
+             goto loopclean;
+ 
++        /* Asking a codec for the capabilities of a type it does not declare
++         * throws, and doing so for every codec on the device cost the better
++         * part of a second on slow ones. */
++        types = (*env)->CallObjectMethod(env, info, jfields.get_supported_types);
++        num_types = (*env)->GetArrayLength(env, types);
++        bool declares_mime = false;
++        for (int j = 0; j < num_types && !declares_mime; j++)
++        {
++            jobject type = (*env)->GetObjectArrayElement(env, types, j);
++            declares_mime = !jstrcmp(env, type, psz_mime);
++            (*env)->DeleteLocalRef(env, type);
++        }
++        if (!declares_mime)
++            goto loopclean;
++
+         codec_capabilities = (*env)->CallObjectMethod(env, info,
+                                                       jfields.get_capabilities_for_type,
+                                                       jmime);
+@@ -318,46 +333,33 @@ char* MediaCodec_GetName(vlc_object_t *p_obj, vlc_fourcc_t codec,
+         }
+         msg_Dbg(p_obj, "Number of profile levels: %d", profile_levels_len);
+ 
+-        types = (*env)->CallObjectMethod(env, info, jfields.get_supported_types);
+-        num_types = (*env)->GetArrayLength(env, types);
+-        found = false;
+-
+-        for (int j = 0; j < num_types && !found; j++)
++        /* The mime type is matching for this component. We now check if the
++           capabilities of the codec is matching the video format. */
++        if (profile > 0)
+         {
+-            jobject type = (*env)->GetObjectArrayElement(env, types, j);
+-            if (!jstrcmp(env, type, psz_mime))
++            /* This decoder doesn't expose its profiles and is high
++             * profile capable */
++            if (!strncmp(name_ptr, "OMX.LUMEVideoDecoder", __MIN(20, name_len)))
++                found = true;
++
++            for (int i = 0; i < profile_levels_len && !found; ++i)
+             {
+-                /* The mime type is matching for this component. We
+-                   now check if the capabilities of the codec is
+-                   matching the video format. */
+-                if (profile > 0)
+-                {
+-                    /* This decoder doesn't expose its profiles and is high
+-                     * profile capable */
+-                    if (!strncmp(name_ptr, "OMX.LUMEVideoDecoder", __MIN(20, name_len)))
+-                        found = true;
+-
+-                    for (int i = 0; i < profile_levels_len && !found; ++i)
+-                    {
+-                        jobject profile_level = (*env)->GetObjectArrayElement(env, profile_levels, i);
+-
+-                        int omx_profile = (*env)->GetIntField(env, profile_level, jfields.profile_field);
+-                        (*env)->DeleteLocalRef(env, profile_level);
+-
+-                        int codec_profile =
+-                            convert_omx_to_profile_idc(codec, omx_profile);
+-                        if (codec_profile != profile)
+-                            continue;
+-                        /* Some encoders set the level too high, thus we ignore it for the moment.
+-                           We could try to guess the actual profile based on the resolution. */
+-                        found = true;
+-                    }
+-                }
+-                else
+-                    found = true;
++                jobject profile_level = (*env)->GetObjectArrayElement(env, profile_levels, i);
++
++                int omx_profile = (*env)->GetIntField(env, profile_level, jfields.profile_field);
++                (*env)->DeleteLocalRef(env, profile_level);
++
++                int codec_profile =
++                    convert_omx_to_profile_idc(codec, omx_profile);
++                if (codec_profile != profile)
++                    continue;
++                /* Some encoders set the level too high, thus we ignore it for the moment.
++                   We could try to guess the actual profile based on the resolution. */
++                found = true;
+             }
+-            (*env)->DeleteLocalRef(env, type);
+         }
++        else
++            found = true;
+         if (found)
+         {
+             msg_Dbg(p_obj, "using %.*s", name_len, name_ptr);
+@@ -417,4 +419,61 @@ loopclean:
+     (*env)->DeleteLocalRef(env, jmime);
+ 
+     return psz_name;
+-}
+\ No newline at end of file
++}
++/* The codec list is fixed for the life of the process, and walking it through
++ * JNI is slow enough to show on every stream open. */
++#define CODEC_NAME_CACHE_SIZE 16
++
++static struct
++{
++    vlc_fourcc_t codec;
++    int profile;
++    char mime[32];
++    char *name; /* NULL: no decoder */
++    int quirks;
++} codec_name_cache[CODEC_NAME_CACHE_SIZE];
++static size_t codec_name_cache_count;
++static vlc_mutex_t codec_name_cache_lock = VLC_STATIC_MUTEX;
++
++char* MediaCodec_GetName(vlc_object_t *p_obj, vlc_fourcc_t codec,
++                         const char *psz_mime, int profile, int *p_quirks)
++{
++    bool cacheable = strlen(psz_mime) < sizeof(codec_name_cache[0].mime);
++
++    vlc_mutex_lock(&codec_name_cache_lock);
++    for (size_t i = 0; cacheable && i < codec_name_cache_count; i++)
++    {
++        if (codec_name_cache[i].codec == codec
++         && codec_name_cache[i].profile == profile
++         && !strcmp(codec_name_cache[i].mime, psz_mime))
++        {
++            char *name = codec_name_cache[i].name ? strdup(codec_name_cache[i].name) : NULL;
++            *p_quirks |= codec_name_cache[i].quirks;
++            vlc_mutex_unlock(&codec_name_cache_lock);
++            return name;
++        }
++    }
++    vlc_mutex_unlock(&codec_name_cache_lock);
++
++    int quirks = 0;
++    char *name = ScanCodecs(p_obj, codec, psz_mime, profile, &quirks);
++    *p_quirks |= quirks;
++
++    vlc_mutex_lock(&codec_name_cache_lock);
++    if (cacheable && codec_name_cache_count < CODEC_NAME_CACHE_SIZE)
++    {
++        size_t i = codec_name_cache_count;
++        char *copy = name ? strdup(name) : NULL;
++        if (name == NULL || copy != NULL)
++        {
++            codec_name_cache[i].codec = codec;
++            codec_name_cache[i].profile = profile;
++            strcpy(codec_name_cache[i].mime, psz_mime);
++            codec_name_cache[i].name = copy;
++            codec_name_cache[i].quirks = quirks;
++            codec_name_cache_count++;
++        }
++    }
++    vlc_mutex_unlock(&codec_name_cache_lock);
++    return name;
++}
+-- 
+2.56.0
+

@@ -1,0 +1,56 @@
+From f61c55ec7b0c987552d108b888c60432778bd11b Mon Sep 17 00:00:00 2001
+Message-Id: <f61c55ec7b0c987552d108b888c60432778bd11b.1791968979.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Wed, 14 Oct 2026 20:09:05 +1100
+Subject: [PATCH 1/2] MediaPlayer: select the video track again when the
+ surface returns
+
+The player keeps the vout of a deselected track for reuse, so the vout
+count does not drop to zero when the surface is destroyed. The track
+disabled then was never selected again, and a paused video came back
+black.
+---
+ .../main/java/org/videolan/libvlc/MediaPlayer.java   | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java b/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java
+index 57ea5cb..54a0508 100644
+--- a/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java
++++ b/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java
+@@ -449,8 +449,9 @@ public class MediaPlayer extends VLCObject<MediaPlayer.Event> {
+             synchronized (MediaPlayer.this) {
+                 if (!mPlaying && mPlayRequested)
+                     play = true;
+-                else if (mVoutCount == 0)
++                else if (mVoutCount == 0 || mVideoDisabledForSurface)
+                     enableVideo = true;
++                mVideoDisabledForSurface = false;
+             }
+             if (play)
+                 play();
+@@ -462,14 +463,21 @@ public class MediaPlayer extends VLCObject<MediaPlayer.Event> {
+         public void onSurfacesDestroyed(AWindow vout) {
+             boolean disableVideo = false;
+             synchronized (MediaPlayer.this) {
+-                if (mVoutCount > 0)
++                if (mVoutCount > 0) {
+                     disableVideo = true;
++                    mVideoDisabledForSurface = true;
++                }
+             }
+             if (disableVideo)
+                 setVideoTrackEnabled(false);
+         }
+     });
+ 
++    /* The player keeps the vout of a deselected track for reuse, so the vout count does
++     * not drop when the surface goes: without this, the track disabled here was never
++     * selected again and a paused video came back black. */
++    private boolean mVideoDisabledForSurface = false;
++
+     private synchronized void updateAudioOutputDevice(long encodingFlags, String defaultDevice) {
+         mCanDoPassthrough = encodingFlags != 0;
+         final String newDeviceId = mAudioDigitalOutputEnabled && mCanDoPassthrough ? "encoded:" + encodingFlags : defaultDevice;
+-- 
+2.56.0
+

@@ -1,0 +1,29 @@
+From 205481f855c1e8e2561706fc4b5f04ac0a2014e7 Mon Sep 17 00:00:00 2001
+Message-Id: <205481f855c1e8e2561706fc4b5f04ac0a2014e7.1791968979.git.dev@kobbler.invalid>
+In-Reply-To: <f61c55ec7b0c987552d108b888c60432778bd11b.1791968979.git.dev@kobbler.invalid>
+References: <f61c55ec7b0c987552d108b888c60432778bd11b.1791968979.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Wed, 14 Oct 2026 20:09:05 +1100
+Subject: [PATCH 2/2] buildsystem: allow extra modules to be left out of libvlc
+
+VLC_MODULE_BLACKLIST_EXTRA is appended to the module blacklist, so a
+build can drop the modules it does not need without patching the list.
+---
+ buildsystem/build-libvlc.sh | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/buildsystem/build-libvlc.sh b/buildsystem/build-libvlc.sh
+index 382e9cf..a20a031 100755
+--- a/buildsystem/build-libvlc.sh
++++ b/buildsystem/build-libvlc.sh
+@@ -430,6 +430,7 @@ VLC_MODULE_BLACKLIST="
+     wall
+     yuv
+     .dummy
++    ${VLC_MODULE_BLACKLIST_EXTRA}
+ "
+ 
+ ###########################
+-- 
+2.56.0
+

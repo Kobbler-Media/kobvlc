@@ -1,0 +1,75 @@
+# Modules left out of libvlc.so on top of libvlcjni's own list, one regex per line,
+# matched against the plugin name. A module's contrib libraries go with it.
+# Keep anything playback can reach: demuxers, decoders, subtitles, audio and video output.
+
+# Encoders
+x264
+x26410b
+twolame
+aom
+
+# Stream output and muxing: casting goes through the Cast SDK, not VLC
+stream_out_.*
+mux_.*
+access_output_.*
+demux_chromecast
+
+# Discs
+libbluray
+dvdnav
+dvdread
+
+# Network shares, discovery and streaming protocols kobbler does not serve
+smb2
+nfs
+sftp
+dsm
+ftp
+gopher
+webdav
+upnp
+microdns
+live555
+rtp.*
+rist
+satip
+amt
+sdp
+access_mms
+dtv
+
+# Scripting, tagging, archives
+lua
+taglib
+archive
+
+# Game music and MIDI
+gme
+fluidsynth
+mod
+smf
+
+# Japanese broadcast captions
+aribcaption
+
+# Tracing and logging other than logcat
+fingerprinter
+json_tracer
+preparserserializer_json
+file_logger
+console_logger
+syslog
+
+# Novelty video and audio filters
+anaglyph
+antiflicker
+canvas
+colorthres
+edgedetection
+gaussianblur
+invert
+oldmovie
+sepia
+vhs
+postproc
+karaoke
