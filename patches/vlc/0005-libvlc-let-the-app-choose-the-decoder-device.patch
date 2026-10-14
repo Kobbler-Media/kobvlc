@@ -1,0 +1,144 @@
+From caf2fa688b44c64080ea5c97d1fbd8a03f468f09 Mon Sep 17 00:00:00 2001
+Message-Id: <caf2fa688b44c64080ea5c97d1fbd8a03f468f09.1791977240.git.dev@kobbler.invalid>
+In-Reply-To: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
+References: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Wed, 14 Oct 2026 22:23:55 +1100
+Subject: [PATCH 5/5] libvlc: let the app choose the decoder device
+
+A player drawing through video callbacks always decoded in software:
+libvlc_video_set_callbacks() sets dec-dev to none, and the decoder device
+belongs to the vout, which a media option does not reach. Add
+libvlc_video_set_decoder_device() to pick the module and device node.
+
+The free vout kept the decoder device it was first given, so a new
+choice only took effect with a new player. It now opens the device
+again when the one asked for has changed.
+---
+ include/vlc/libvlc_media_player.h | 18 ++++++++++++++++++
+ lib/libvlc.sym                    |  1 +
+ lib/media_player.c                |  8 ++++++++
+ src/video_output/video_output.c   | 25 +++++++++++++++++++++++++
+ 4 files changed, 52 insertions(+)
+
+diff --git a/include/vlc/libvlc_media_player.h b/include/vlc/libvlc_media_player.h
+index a9631f9a3d..fd7146efd8 100644
+--- a/include/vlc/libvlc_media_player.h
++++ b/include/vlc/libvlc_media_player.h
+@@ -523,6 +523,24 @@ void libvlc_video_set_format( libvlc_media_player_t *mp, const char *chroma,
+                               unsigned width, unsigned height,
+                               unsigned pitch );
+ 
++/**
++ * Choose the hardware the player decodes video on.
++ *
++ * libvlc_video_set_callbacks() and the other video outputs pick a decoder
++ * device of their own; this overrides that choice, so call it after them.
++ * It applies from the next media the player opens.
++ *
++ * \param mp the media player
++ * \param name decoder device module, such as "vaapi_drm", "any" to try them
++ *             all, "none" to decode in software, or NULL for libvlc's default
++ * \param path device node the decoder device opens, such as a DRM render
++ *             node, or NULL to let it pick
++ * \version LibVLC 4.0.0 or later
++ */
++LIBVLC_API
++void libvlc_video_set_decoder_device( libvlc_media_player_t *mp,
++                                      const char *name, const char *path );
++
+ /**
+  * Set decoded video chroma and dimensions. This only works in combination with
+  * libvlc_video_set_callbacks().
+diff --git a/lib/libvlc.sym b/lib/libvlc.sym
+index f92df6b013..00e651c48d 100644
+--- a/lib/libvlc.sym
++++ b/lib/libvlc.sym
+@@ -259,6 +259,7 @@ libvlc_video_set_callbacks
+ libvlc_video_set_crop_ratio
+ libvlc_video_set_crop_window
+ libvlc_video_set_crop_border
++libvlc_video_set_decoder_device
+ libvlc_video_get_display_fit
+ libvlc_video_set_display_fit
+ libvlc_video_set_deinterlace
+diff --git a/lib/media_player.c b/lib/media_player.c
+index a8563478cb..746ec25302 100644
+--- a/lib/media_player.c
++++ b/lib/media_player.c
+@@ -675,6 +675,7 @@ libvlc_media_player_new( libvlc_instance_t *instance )
+     var_Create( mp, "vout-cb-select-plane", VLC_VAR_ADDRESS );
+ 
+     var_Create (mp, "dec-dev", VLC_VAR_STRING);
++    var_Create (mp, "dec-dev-path", VLC_VAR_STRING);
+ 
+     mp->vout.default_gl = var_GetString(mp, "gl");
+     mp->vout.default_gles2 = var_GetString(mp, "gles2");
+@@ -1119,6 +1120,13 @@ void libvlc_video_set_callbacks( libvlc_media_player_t *mp,
+     var_SetString( mp, "window", "dummy" );
+ }
+ 
++void libvlc_video_set_decoder_device( libvlc_media_player_t *mp,
++                                      const char *name, const char *path )
++{
++    var_SetString( mp, "dec-dev", name ? name : mp->vout.default_dec_dev );
++    var_SetString( mp, "dec-dev-path", path ? path : "" );
++}
++
+ void libvlc_video_set_format_callbacks( libvlc_media_player_t *mp,
+                                         libvlc_video_format_cb setup,
+                                         libvlc_video_cleanup_cb cleanup )
+diff --git a/src/video_output/video_output.c b/src/video_output/video_output.c
+index 90a0bcd617..6c953fb631 100644
+--- a/src/video_output/video_output.c
++++ b/src/video_output/video_output.c
+@@ -146,6 +146,7 @@ typedef struct vout_thread_sys_t
+     unsigned        window_height; /* protected by display_lock */
+     vlc_mutex_t     window_lock;
+     vlc_decoder_device *dec_device;
++    char            *dec_device_choice;
+ 
+     /* Video output display */
+     vout_display_cfg_t display_cfg;
+@@ -2161,6 +2162,7 @@ void vout_Release(vout_thread_t *vout)
+ 
+     if (sys->dec_device)
+         vlc_decoder_device_Release(sys->dec_device);
++    free(sys->dec_device_choice);
+ 
+     assert(!sys->window_enabled);
+     vout_display_window_Delete(sys->display_cfg.window);
+@@ -2490,10 +2492,33 @@ vlc_decoder_device *vout_GetDevice(vout_thread_t *vout)
+ 
+     vout_thread_sys_t *sys = VOUT_THREAD_TO_SYS(vout);
+ 
++    /* A vout outlives the input it was made for, and the next one may ask for
++     * other hardware: the device it opened is only kept while it still is the
++     * one asked for. */
++    char *name = var_InheritString(&vout->obj, "dec-dev");
++    char *path = var_InheritString(&vout->obj, "dec-dev-path");
++    char *choice;
++    if (asprintf(&choice, "%s\n%s", name ? name : "", path ? path : "") < 0)
++        choice = NULL;
++    free(name);
++    free(path);
++
+     vlc_mutex_lock(&sys->window_lock);
++    if (sys->dec_device != NULL && choice != NULL && sys->dec_device_choice != NULL
++     && strcmp(choice, sys->dec_device_choice) != 0)
++    {
++        vlc_decoder_device_Release(sys->dec_device);
++        sys->dec_device = NULL;
++    }
+     if (sys->dec_device == NULL)
++    {
+         sys->dec_device = vlc_decoder_device_Create(&vout->obj, sys->display_cfg.window);
++        free(sys->dec_device_choice);
++        sys->dec_device_choice = choice;
++        choice = NULL;
++    }
+     dec_device = sys->dec_device ? vlc_decoder_device_Hold( sys->dec_device ) : NULL;
+     vlc_mutex_unlock(&sys->window_lock);
++    free(choice);
+     return dec_device;
+ }

@@ -1,10 +1,10 @@
-From 6a65f2df2b40d993cbc8ba68ea1f952f5b52f405 Mon Sep 17 00:00:00 2001
-Message-Id: <6a65f2df2b40d993cbc8ba68ea1f952f5b52f405.1791968979.git.dev@kobbler.invalid>
-In-Reply-To: <e59704e78605d362e0ab11cd7a4a72cbdffaf542.1791968979.git.dev@kobbler.invalid>
-References: <e59704e78605d362e0ab11cd7a4a72cbdffaf542.1791968979.git.dev@kobbler.invalid>
+From b9be89cb4cdea9c884d8cae40726cc62e2bf6a2e Mon Sep 17 00:00:00 2001
+Message-Id: <b9be89cb4cdea9c884d8cae40726cc62e2bf6a2e.1791977240.git.dev@kobbler.invalid>
+In-Reply-To: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
+References: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
 From: Kobbler-Media <dev@kobbler.invalid>
 Date: Wed, 14 Oct 2026 19:47:08 +1100
-Subject: [PATCH 3/3] mediacodec: find the decoder without probing every codec
+Subject: [PATCH 3/5] mediacodec: find the decoder without probing every codec
 
 Ask a codec for its capabilities only once it declares the MIME type:
 querying every codec on the device threw an exception for each that did
@@ -185,6 +185,3 @@ index 5be03b6c3e..0de1d0249d 100644
 +    vlc_mutex_unlock(&codec_name_cache_lock);
 +    return name;
 +}
--- 
-2.56.0
-

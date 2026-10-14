@@ -59,6 +59,7 @@ preparserserializer_json
 file_logger
 console_logger
 syslog
+sd_journal
 
 # Novelty video and audio filters
 anaglyph

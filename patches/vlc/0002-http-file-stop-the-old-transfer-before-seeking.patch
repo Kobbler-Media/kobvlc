@@ -1,10 +1,10 @@
-From 52e038c5f69a174a14b611d02741e7a2d9f6cc9f Mon Sep 17 00:00:00 2001
-Message-Id: <52e038c5f69a174a14b611d02741e7a2d9f6cc9f.1791968979.git.dev@kobbler.invalid>
-In-Reply-To: <e59704e78605d362e0ab11cd7a4a72cbdffaf542.1791968979.git.dev@kobbler.invalid>
-References: <e59704e78605d362e0ab11cd7a4a72cbdffaf542.1791968979.git.dev@kobbler.invalid>
+From 8d3d88cd6c72d5231f40a073e179b392f935373d Mon Sep 17 00:00:00 2001
+Message-Id: <8d3d88cd6c72d5231f40a073e179b392f935373d.1791977240.git.dev@kobbler.invalid>
+In-Reply-To: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
+References: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
 From: Kobbler-Media <dev@kobbler.invalid>
 Date: Wed, 14 Oct 2026 19:47:08 +1100
-Subject: [PATCH 2/3] http: file: stop the old transfer before seeking
+Subject: [PATCH 2/5] http: file: stop the old transfer before seeking
 
 A server that has already honoured a range request will honour the next
 one, so the response being replaced has nothing left to fall back to.
@@ -58,6 +58,3 @@ index 17ff23f991..b45a7dd016 100644
      }
  
      res->response = resp;
--- 
-2.56.0
-

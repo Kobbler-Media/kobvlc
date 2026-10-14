@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publishes what android/build.sh laid out under work/maven: as a GitHub release, which is
+# Publishes the AAR android/build.sh laid out under work/maven: as a GitHub release, which is
 # what kobapp resolves from (an Ivy layout, readable from anywhere, CI included), and to
 # the LAN Maven host, which keeps only the two newest versions.
 set -euo pipefail

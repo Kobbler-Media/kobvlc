@@ -1,0 +1,58 @@
+From 677d6dad13c4ba46ee88b28e0b2a6cbd12af9070 Mon Sep 17 00:00:00 2001
+Message-Id: <677d6dad13c4ba46ee88b28e0b2a6cbd12af9070.1791977240.git.dev@kobbler.invalid>
+In-Reply-To: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
+References: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Wed, 14 Oct 2026 22:23:15 +1100
+Subject: [PATCH 4/5] decoder device: let the user pick the device node
+
+A machine with more than one GPU decoded on whichever render node the
+VA-API DRM decoder device found first, with no way to choose another.
+Add a dec-dev-path option naming the node the decoder device opens.
+---
+ modules/hw/vaapi/decoder_device.c | 8 ++++++--
+ src/libvlc-module.c               | 5 +++++
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/modules/hw/vaapi/decoder_device.c b/modules/hw/vaapi/decoder_device.c
+index f203df856b..ee35356fe5 100644
+--- a/modules/hw/vaapi/decoder_device.c
++++ b/modules/hw/vaapi/decoder_device.c
+@@ -200,8 +200,12 @@ vaapi_InitializeInstanceDRM(vlc_object_t *o,
+ static struct vaapi_instance *
+ drm_init_vaapi_instance(vlc_decoder_device *device, VADisplay *vadpyp)
+ {
+-    return vaapi_InitializeInstanceDRM(VLC_OBJECT(device), vaGetDisplayDRM,
+-                                       vadpyp, NULL);
++    char *path = var_InheritString(device, "dec-dev-path");
++    struct vaapi_instance *va_inst =
++        vaapi_InitializeInstanceDRM(VLC_OBJECT(device), vaGetDisplayDRM,
++                                    vadpyp, path);
++    free(path);
++    return va_inst;
+ }
+ #endif
+ 
+diff --git a/src/libvlc-module.c b/src/libvlc-module.c
+index 7af1aa8ac2..f532c5fa98 100644
+--- a/src/libvlc-module.c
++++ b/src/libvlc-module.c
+@@ -1021,6 +1021,10 @@ static const char* const ppsz_restore_playback_desc[] = {
+ 
+ #define DEC_DEV_TEXT N_("Preferred decoder hardware device")
+ #define DEC_DEV_LONGTEXT N_("This allows hardware decoding when available.")
++#define DEC_DEV_PATH_TEXT N_("Decoder hardware device path")
++#define DEC_DEV_PATH_LONGTEXT N_( \
++    "The device node the decoder device opens, such as a DRM render node. " \
++    "Leave empty to let the decoder device pick one.")
+ 
+ /*****************************************************************************
+  * Sout
+@@ -2040,6 +2044,7 @@ vlc_module_begin ()
+     add_bool( "hw-dec", true, HW_DEC_TEXT, HW_DEC_LONGTEXT )
+     add_obsolete_string( "encoder" ) /* since 4.0.0 */
+     add_module("dec-dev", "decoder device", "any", DEC_DEV_TEXT, DEC_DEV_LONGTEXT)
++    add_string("dec-dev-path", NULL, DEC_DEV_PATH_TEXT, DEC_DEV_PATH_LONGTEXT)
+ 
+     //set_subcategory( SUBCAT_INPUT_SCODEC )
+     set_subcategory( SUBCAT_INPUT_STREAM_FILTER )

@@ -1,8 +1,8 @@
-From e59704e78605d362e0ab11cd7a4a72cbdffaf542 Mon Sep 17 00:00:00 2001
-Message-Id: <e59704e78605d362e0ab11cd7a4a72cbdffaf542.1791968979.git.dev@kobbler.invalid>
+From 8bbee53215a2fe1b7845ec38b3385347f5d6aa41 Mon Sep 17 00:00:00 2001
+Message-Id: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
 From: Kobbler-Media <dev@kobbler.invalid>
 Date: Wed, 14 Oct 2026 14:14:47 +1100
-Subject: [PATCH 1/3] android: display: release the window surface on close
+Subject: [PATCH 1/5] android: display: release the window surface on close
 
 The vout keeps its window when the player saves it for the next video,
 and the app may set a new surface on it in between. Without releasing
@@ -31,6 +31,3 @@ index ca50379bd7..8510ff3086 100644
      free(sys);
  }
  
--- 
-2.56.0
-

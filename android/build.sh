@@ -53,7 +53,7 @@ fi
 BUILD_IMAGE="$(sed -n 's/^ *image: *//p' "$JNI/buildsystem/gitlab/.gitlab-ci.yml" | head -n1)"
 [ -n "$BUILD_IMAGE" ] || { echo "no build image in libvlcjni's CI file" >&2; exit 1; }
 
-BLACKLIST_EXTRA="$(grep -vE '^\s*(#|$)' "$ROOT/android/modules-blacklist" | tr '\n' ' ')"
+BLACKLIST_EXTRA="$(grep -vE '^\s*(#|$)' "$ROOT/modules-blacklist" | tr '\n' ' ')"
 
 for abi in "${ABIS[@]}"; do
   triplet="${TRIPLETS[$abi]}"
