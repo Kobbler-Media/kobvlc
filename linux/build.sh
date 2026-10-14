@@ -55,6 +55,13 @@ docker run --rm -v "$SRC:/src" -v "$OUT:/out" -w /src -e BLACKLIST="$BLACKLIST" 
     # prefix they were built for.
     find /out/stage/opt/kobvlc/lib/vlc/plugins -name "*.so" -exec \
       patchelf --force-rpath --set-rpath "\$ORIGIN/../..:\$ORIGIN/../../.." {} +
+    # VLC 3 gives its libvlccore the same soname, and a library asking for it by that name
+    # binds to whichever copy the process loaded first. Ours answers to a name of its own.
+    core="$(ls /out/stage/opt/kobvlc/lib/libvlccore.so.*.*.*)"
+    old="$(patchelf --print-soname "$core")"
+    patchelf --set-soname libvlccore.so "$core"
+    find /out/stage/opt/kobvlc/lib -name "*.so*" -type f ! -name "libvlccore.so*" \
+      -exec patchelf --replace-needed "$old" libvlccore.so {} +
     chown -R "$HOST_UID:$HOST_GID" /src /out
   '
 
@@ -69,8 +76,7 @@ find "$TREE/lib/vlc/plugins" -type d -empty -delete
 mkdir -p "$OUT/pkg/lib"
 rm -rf "$OUT/pkg/lib"/*
 # One file per library, as Gradle unpacks a symlink as an empty file. libvlc and libvlccore
-# under the names JNA looks up: a miss falls through to the system's libvlc. vlcj loads
-# libvlccore first, which is what then satisfies libvlc's dependency on it by soname.
+# under the names JNA looks up: a miss falls through to the system's libvlc.
 cp -L "$TREE/lib/libvlc.so" "$TREE/lib/libvlccore.so" "$OUT/pkg/lib/"
 # The plugins' helpers under their sonames.
 by_soname() {
