@@ -29,6 +29,8 @@ mkdir -p "$WORK"
 # series, after upstream's, so get-vlc applies the lot in order.
 [ -d "$JNI/.git" ] || git clone -q "$LIBVLCJNI_URL" "$JNI"
 git -C "$JNI" cat-file -e "$LIBVLCJNI_COMMIT" 2>/dev/null || git -C "$JNI" fetch -q origin
+# A run that stopped on a patch that no longer applies leaves the series half applied.
+git -C "$JNI" am --abort 2>/dev/null || true
 git -C "$JNI" reset -q --hard "$LIBVLCJNI_COMMIT"
 git -C "$JNI" clean -qfd -- libvlc/patches
 "${GIT_AS_BUILD[@]}" -C "$JNI" am -q "$ROOT"/patches/libvlcjni/*.patch
@@ -41,11 +43,15 @@ done
 VLC_HASH="$(sed -n 's/^VLC_TESTED_HASH=//p' "$JNI/buildsystem/get-vlc.sh")"
 if [ -d "$VLC/.git" ]; then
   git -C "$VLC" cat-file -e "$VLC_HASH" 2>/dev/null || git -C "$VLC" fetch -q origin
+  git -C "$VLC" am --abort 2>/dev/null || true
   git -C "$VLC" reset -q --hard "$VLC_HASH"
   "${GIT_AS_BUILD[@]}" -C "$VLC" am -q --message-id "$JNI"/libvlc/patches/*.patch
 else
   (cd "$JNI" && ./buildsystem/get-vlc.sh)
 fi
+
+BUILD_IMAGE="$(sed -n 's/^ *image: *//p' "$JNI/buildsystem/gitlab/.gitlab-ci.yml" | head -n1)"
+[ -n "$BUILD_IMAGE" ] || { echo "no build image in libvlcjni's CI file" >&2; exit 1; }
 
 BLACKLIST_EXTRA="$(grep -vE '^\s*(#|$)' "$ROOT/android/modules-blacklist" | tr '\n' ' ')"
 

@@ -53,6 +53,21 @@ android/build.sh && maven/publish.sh
 `publish.sh` copies the version to the Maven host and keeps only the newest two there.
 The host serves `maven/data` with `maven/compose.yml` (`docker compose up -d` from `maven/`).
 
+## Following VideoLAN
+
+libvlcjni moves VLC forward by bumping `VLC_TESTED_HASH` and its CI image together; taking
+a newer libvlcjni takes both.
+
+1. Set `LIBVLCJNI_COMMIT` in `versions.env` to the new commit and bump `VERSION`
+   (`4.0.0-eap30-kob1` for a new upstream release, `-kob2` for our own change on the same one).
+2. `android/build.sh arm64` — the quickest way to find out whether the patches still apply.
+   A patch that upstream has taken is deleted here; one that conflicts is fixed in
+   `work/libvlcjni` or `work/libvlcjni/vlc` and exported again (see below).
+3. Try it on a device, then `android/build.sh && maven/publish.sh` and bump
+   `libvlc-android` in kobapp's `gradle/libs.versions.toml`.
+
+Every patch here is written to be sent upstream; each one VideoLAN takes is one less to carry.
+
 ## Changing VLC
 
 Work in `work/libvlcjni/vlc`, commit, then export with
