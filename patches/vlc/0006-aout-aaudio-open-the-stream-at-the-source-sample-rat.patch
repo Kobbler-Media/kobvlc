@@ -1,0 +1,53 @@
+From bddcbe545b2be15d6b0c846d18d9e7f23ed28f00 Mon Sep 17 00:00:00 2001
+Message-Id: <bddcbe545b2be15d6b0c846d18d9e7f23ed28f00.1792296272.git.dev@kobbler.invalid>
+In-Reply-To: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
+References: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Sun, 18 Oct 2026 15:04:17 +1100
+Subject: [PATCH 6/6] aout: aaudio: open the stream at the source sample rate
+
+Left unspecified, AAudio opens the stream at the device's preferred rate.
+On a Pixel 10 that is 96kHz while the speaker mixer runs at 48kHz, so VLC
+resampled every 48kHz track up to 96kHz on the CPU and AudioFlinger
+resampled it back down. Ask for the source rate; the platform still
+converts when the path needs it, and the rate it settles on is read back
+as before.
+---
+ modules/audio_output/android/aaudio.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/modules/audio_output/android/aaudio.c b/modules/audio_output/android/aaudio.c
+index 1ad7b679e8..45dbcfa06d 100644
+--- a/modules/audio_output/android/aaudio.c
++++ b/modules/audio_output/android/aaudio.c
+@@ -97,6 +97,7 @@ static struct {
+     void                  (*AAudioStreamBuilder_setDeviceId)(AAudioStreamBuilder *, int32_t);
+     void                  (*AAudioStreamBuilder_setFormat)(AAudioStreamBuilder *, aaudio_format_t);
+     void                  (*AAudioStreamBuilder_setChannelCount)(AAudioStreamBuilder *, int32_t);
++    void                  (*AAudioStreamBuilder_setSampleRate)(AAudioStreamBuilder *, int32_t);
+     void                  (*AAudioStreamBuilder_setChannelMask)(AAudioStreamBuilder *, aaudio_channel_mask_t);
+     void                  (*AAudioStreamBuilder_setDataCallback)(AAudioStreamBuilder *, AAudioStream_dataCallback, void *);
+     void                  (*AAudioStreamBuilder_setErrorCallback)(AAudioStreamBuilder *, AAudioStream_errorCallback,  void *);
+@@ -163,6 +164,7 @@ LoadSymbols(aout_stream_t *stream)
+     AAUDIO_DLSYM(AAudio_createStreamBuilder, true);
+     AAUDIO_DLSYM(AAudio_convertResultToText, true);
+     AAUDIO_DLSYM(AAudioStreamBuilder_setChannelCount, true);
++    AAUDIO_DLSYM(AAudioStreamBuilder_setSampleRate, true);
+     AAUDIO_DLSYM(AAudioStreamBuilder_setChannelMask, false);
+     AAUDIO_DLSYM(AAudioStreamBuilder_setDeviceId, true);
+     AAUDIO_DLSYM(AAudioStreamBuilder_setFormat, true);
+@@ -567,6 +569,11 @@ OpenAAudioStream(aout_stream_t *stream)
+     }
+ 
+     vt.AAudioStreamBuilder_setFormat(builder, sys->cfg.format);
++    /* Left unspecified, AAudio offers the device's preferred rate, which can
++     * be higher than the mixer it feeds: VLC then resampled 48kHz up to 96kHz
++     * for AudioFlinger to bring it back down. Ask for the source rate and let
++     * the platform convert only if the path really needs it. */
++    vt.AAudioStreamBuilder_setSampleRate(builder, sys->fmt.i_rate);
+ 
+     uint32_t chans_out[AOUT_CHAN_MAX];
+     AndroidDevice_GetChanOrder(sys->fmt.i_physical_channels, chans_out,
+-- 
+2.56.0
+
