@@ -1,0 +1,764 @@
+From d7cdbe55177121230ed2aa2c94daae26eaffdd6f Mon Sep 17 00:00:00 2001
+Message-Id: <d7cdbe55177121230ed2aa2c94daae26eaffdd6f.1792497887.git.dev@kobbler.invalid>
+In-Reply-To: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
+References: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Tue, 20 Oct 2026 23:04:47 +1100
+Subject: [PATCH 7/7] android: display: pace release times to the vsync
+
+The display asks SurfaceFlinger to present each picture at the date the
+clock gives it, and that date carries the timestamp's jitter: Matroska
+stores milliseconds, so 23.976fps arrives in 41 and 42ms steps.
+SurfaceFlinger presents a buffer on the first vsync whose expected present
+time is past the requested one, and when an app votes a frame rate it may
+latch that app's buffers only on vsyncs at that rate. A Pixel 6 Pro playing
+24p at 120Hz takes the app's buffers every fifth vsync: requests sitting a
+fraction of a millisecond either side of one wait a whole frame, and the
+next two pictures land together, one dropped. The panel runs slightly fast,
+so the requests drift across that boundary every few seconds and each pass
+left a burst of held and dropped frames.
+
+As Media3's VideoFrameReleaseHelper does, fit the timestamps to the frame
+duration found in them, and move each release onto the vsync it is closest
+to, most of a period ahead of it, with hysteresis between two candidates.
+The vsync timeline comes from the NDK Choreographer, sampled every half
+second on a thread of its own; without it (before Android 10) the times are
+only smoothed. The same times feed releaseOutputBufferAtTime when the
+decoder renders straight into the window.
+---
+ modules/video_output/Makefile.am       |   2 +
+ modules/video_output/android/display.c |  36 +++-
+ modules/video_output/android/pacing.c  | 233 +++++++++++++++++++++++
+ modules/video_output/android/pacing.h  |  66 +++++++
+ modules/video_output/android/vsync.c   | 244 +++++++++++++++++++++++++
+ modules/video_output/android/vsync.h   |  31 ++++
+ modules/video_output/meson.build       |   2 +-
+ 7 files changed, 611 insertions(+), 3 deletions(-)
+ create mode 100644 modules/video_output/android/pacing.c
+ create mode 100644 modules/video_output/android/pacing.h
+ create mode 100644 modules/video_output/android/vsync.c
+ create mode 100644 modules/video_output/android/vsync.h
+
+diff --git a/modules/video_output/Makefile.am b/modules/video_output/Makefile.am
+index 7c10995164..7233f3242a 100644
+--- a/modules/video_output/Makefile.am
++++ b/modules/video_output/Makefile.am
+@@ -355,6 +355,8 @@ libandroid_window_plugin_la_LIBADD = \
+ 	libandroid_utils.la $(LIBDL) $(EGL_LIBS) $(GLES2_LIBS)
+ 
+ libandroid_display_plugin_la_SOURCES = video_output/android/display.c \
++	video_output/android/pacing.c video_output/android/pacing.h \
++	video_output/android/vsync.c video_output/android/vsync.h \
+ 	video_output/opengl/sub_renderer.c \
+ 	video_output/opengl/sub_renderer.h
+ libandroid_display_plugin_la_CFLAGS = $(AM_CFLAGS) $(GLES2_CFLAGS) -DUSE_OPENGL_ES2
+diff --git a/modules/video_output/android/display.c b/modules/video_output/android/display.c
+index 8510ff3086..57a3913957 100644
+--- a/modules/video_output/android/display.c
++++ b/modules/video_output/android/display.c
+@@ -39,6 +39,8 @@
+ #include <vlc_vector.h>
+ #include <vlc_opengl.h>
+ #include "utils.h"
++#include "pacing.h"
++#include "vsync.h"
+ #include "../opengl/gl_api.h"
+ #include "../opengl/sub_renderer.h"
+ 
+@@ -128,6 +130,8 @@ struct sys
+     bool can_set_video_layout;
+     android_video_context_t *avctx;
+     struct subpicture sub;
++    struct android_pacing pacing;
++    bool vsync;
+ 
+     struct {
+         ASurfaceControl *sc;
+@@ -434,6 +438,23 @@ delete_win:
+     return -1;
+ }
+ 
++static vlc_tick_t PaceRelease(struct sys *sys, const picture_t *pic,
++                              vlc_tick_t date)
++{
++    if (pic->date == VLC_TICK_INVALID)
++        return date;
++
++    int64_t vsync_time = 0, vsync_period = 0;
++    if (!sys->vsync || !android_vsync_Get(&vsync_time, &vsync_period))
++        vsync_period = 0;
++
++    int64_t release = android_pacing_Adjust(&sys->pacing,
++                                            NS_FROM_VLC_TICK(pic->date),
++                                            NS_FROM_VLC_TICK(date),
++                                            vsync_time, vsync_period);
++    return VLC_TICK_FROM_NS(release);
++}
++
+ static void ASC_OnComplete(void *context, ASurfaceTransactionStats *stats)
+ {
+     picture_t *pic = context;
+@@ -491,7 +512,8 @@ static void PrepareWithASC(vout_display_t *vd, picture_t *pic,
+     int fence_fd = android_picture_ctx_get_fence_fd(apctx);
+ 
+     asc_api->ASurfaceTransaction.setBuffer(txn, sys->asc.sc, buffer, fence_fd);
+-    asc_api->ASurfaceTransaction.setDesiredPresentTime(txn, NS_FROM_VLC_TICK(date));
++    asc_api->ASurfaceTransaction.setDesiredPresentTime(txn,
++                            NS_FROM_VLC_TICK(PaceRelease(sys, pic, date)));
+     asc_api->ASurfaceTransaction.apply(txn);
+     asc_api->ASurfaceTransaction.delete(txn);
+ 
+@@ -520,7 +542,8 @@ static void Prepare(vout_display_t *vd, picture_t *picture,
+     assert(picture->context);
+     assert(sys->asc.sc == NULL);
+     if (sys->avctx->render_ts != NULL)
+-        sys->avctx->render_ts(picture->context, date);
++        sys->avctx->render_ts(picture->context,
++                              PaceRelease(sys, picture, date));
+ 
+     if (sys->sub.window != NULL)
+         subpicture_Prepare(vd, subpicture);
+@@ -639,6 +662,9 @@ static void Close(vout_display_t *vd)
+     if (sys->sub.window != NULL)
+         subpicture_CloseDisplay(vd);
+ 
++    if (sys->vsync)
++        android_vsync_Release();
++
+     /* The window outlives the display when the player keeps it for the next
+      * video, and the app may hand it a new surface in between: the next
+      * display must fetch the surface again rather than reuse a dead one. */
+@@ -720,6 +746,8 @@ static int Open(vout_display_t *vd,
+     sys->awh = awh;
+     sys->can_set_video_layout = can_set_video_layout;
+     sys->asc.sc = NULL;
++    sys->vsync = false;
++    android_pacing_Init(&sys->pacing);
+     sys->avctx = vlc_video_context_GetPrivate(context, VLC_VIDEO_CONTEXT_AWINDOW);
+     assert(sys->avctx);
+ 
+@@ -792,6 +820,10 @@ static int Open(vout_display_t *vd,
+         vd->ops = &ops;
+     }
+ 
++    sys->vsync = android_vsync_Hold();
++    msg_Dbg(vd, "release times paced %s vsync",
++            sys->vsync ? "to" : "without");
++
+     return VLC_SUCCESS;
+ }
+ 
+diff --git a/modules/video_output/android/pacing.c b/modules/video_output/android/pacing.c
+new file mode 100644
+index 0000000000..2624e0ac2e
+--- /dev/null
++++ b/modules/video_output/android/pacing.c
+@@ -0,0 +1,233 @@
++/*****************************************************************************
++ * pacing.c: smooth and vsync-align Android video release times
++ *****************************************************************************
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++/* The release time VLC computes for a picture carries the jitter of its
++ * timestamp: Matroska stores milliseconds, so 23.976fps arrives as 41 and
++ * 42ms steps. SurfaceFlinger presents a buffer on the first vsync whose
++ * expected present time is past the requested one, and the frame rate it
++ * grants the app can space those vsyncs a whole frame apart: a request a
++ * fraction of a millisecond late then waits a frame, and the next two
++ * pictures share a vsync. As Media3's VideoFrameReleaseHelper does, the
++ * timestamps are fitted to the detected frame duration and the release is
++ * moved onto the vsync it is closest to, ahead of it by most of a period. */
++
++#ifdef HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <stdlib.h>
++#include <string.h>
++
++#include "pacing.h"
++
++#define MAX_MATCHING_DIFFERENCE_NS 1000000
++#define VSYNC_OFFSET_PERCENT 80
++
++static void MatcherReset(struct android_frame_matcher *m)
++{
++    memset(m, 0, sizeof(*m));
++}
++
++static bool MatcherSynced(const struct android_frame_matcher *m)
++{
++    return m->count > ANDROID_PACING_SYNC_FRAMES && m->outlier_count == 0;
++}
++
++static bool MatcherLastIsOutlier(const struct android_frame_matcher *m)
++{
++    return m->count > 0
++        && m->outliers[(m->count - 1) % ANDROID_PACING_SYNC_FRAMES];
++}
++
++static int64_t MatcherDuration(const struct android_frame_matcher *m)
++{
++    return m->matching_count > 0 ? m->matching_sum / m->matching_count : 0;
++}
++
++static void MatcherNext(struct android_frame_matcher *m, int64_t pts)
++{
++    if (m->count == 0)
++        m->first_pts = pts;
++    else if (m->count == 1)
++    {
++        m->first_duration = pts - m->first_pts;
++        m->matching_sum = m->first_duration;
++        m->matching_count = 1;
++    }
++    else
++    {
++        bool *outlier = &m->outliers[m->count % ANDROID_PACING_SYNC_FRAMES];
++        if (llabs(pts - m->last_pts - m->first_duration)
++                <= MAX_MATCHING_DIFFERENCE_NS)
++        {
++            m->matching_count++;
++            m->matching_sum += pts - m->last_pts;
++            if (*outlier)
++            {
++                *outlier = false;
++                m->outlier_count--;
++            }
++        }
++        else if (!*outlier)
++        {
++            *outlier = true;
++            m->outlier_count++;
++        }
++    }
++    m->count++;
++    m->last_pts = pts;
++}
++
++static void EstimatorNext(struct android_pacing *p, int64_t pts)
++{
++    MatcherNext(p->current, pts);
++    if (MatcherSynced(p->current))
++        p->candidate_active = false;
++    else if (p->last_pts != INT64_MIN)
++    {
++        if (!p->candidate_active || MatcherLastIsOutlier(p->candidate))
++        {
++            MatcherReset(p->candidate);
++            MatcherNext(p->candidate, p->last_pts);
++        }
++        p->candidate_active = true;
++        MatcherNext(p->candidate, pts);
++    }
++    if (p->candidate_active && MatcherSynced(p->candidate))
++    {
++        struct android_frame_matcher *previous = p->current;
++        p->current = p->candidate;
++        p->candidate = previous;
++        p->candidate_active = false;
++    }
++    p->last_pts = pts;
++}
++
++static void EstimatorReset(struct android_pacing *p)
++{
++    MatcherReset(&p->matchers[0]);
++    MatcherReset(&p->matchers[1]);
++    p->current = &p->matchers[0];
++    p->candidate = &p->matchers[1];
++    p->candidate_active = false;
++    p->last_pts = INT64_MIN;
++}
++
++void android_pacing_Init(struct android_pacing *p)
++{
++    EstimatorReset(p);
++    p->anchored = false;
++    p->hysteresis = 0;
++    p->cached_pts = INT64_MIN;
++}
++
++static int64_t SmoothPts(struct android_pacing *p, int64_t pts)
++{
++    if (p->last_pts != INT64_MIN && pts <= p->last_pts)
++    {
++        /* A seek or a new stream: the frame rate has to be found again. */
++        EstimatorReset(p);
++        p->anchored = false;
++    }
++    EstimatorNext(p, pts);
++
++    int64_t duration = MatcherSynced(p->current)
++                     ? MatcherDuration(p->current) : 0;
++    if (duration <= 0)
++    {
++        p->anchored = false;
++        return pts;
++    }
++
++    if (p->anchored)
++    {
++        /* Counted from the timestamps, so pictures dropped before the
++         * display keep their slot. */
++        int64_t frames = (pts - p->anchor_pts + duration / 2) / duration;
++        int64_t smooth = p->anchor_smooth + frames * duration;
++        if (frames > 0 && llabs(smooth - pts) <= duration / 4)
++        {
++            p->anchor_pts = pts;
++            p->anchor_smooth = smooth;
++            return smooth;
++        }
++    }
++    p->anchored = true;
++    p->anchor_pts = pts;
++    p->anchor_smooth = pts;
++    return pts;
++}
++
++static int64_t SnapToVsync(struct android_pacing *p, int64_t release,
++                           int64_t vsync_time, int64_t period)
++{
++    int64_t count = (release - vsync_time) / period;
++    int64_t snapped = vsync_time + period * count;
++    int64_t before, after;
++    if (release <= snapped)
++    {
++        before = snapped - period;
++        after = snapped;
++    }
++    else
++    {
++        before = snapped;
++        after = snapped + period;
++    }
++    int64_t after_diff = after - release;
++    int64_t before_diff = release - before;
++
++    /* Hysteresis keeps a release that sits halfway between two vsyncs on the
++     * one it had, rather than flipping on every bit of residual jitter. */
++    int64_t diffs_diff = llabs(after_diff - before_diff);
++    if (diffs_diff < period / 2)
++    {
++        int64_t range = period / 4;
++        if (diffs_diff < range)
++        {
++            if (p->hysteresis == 0)
++                p->hysteresis = after_diff < before_diff ? -range : range;
++        }
++        else
++            p->hysteresis = 0;
++    }
++
++    return after_diff + p->hysteresis < before_diff ? after : before;
++}
++
++int64_t android_pacing_Adjust(struct android_pacing *p, int64_t pts,
++                              int64_t date, int64_t vsync_time,
++                              int64_t vsync_period)
++{
++    /* The same picture again, redisplayed while paused or forced out. */
++    if (pts == p->cached_pts && date == p->cached_date)
++        return p->cached_release;
++
++    if (pts != p->cached_pts)
++        p->cached_offset = SmoothPts(p, pts) - pts;
++    int64_t release = date + p->cached_offset;
++
++    if (vsync_period > 0)
++        release = SnapToVsync(p, release, vsync_time, vsync_period)
++                - vsync_period * VSYNC_OFFSET_PERCENT / 100;
++
++    p->cached_pts = pts;
++    p->cached_date = date;
++    p->cached_release = release;
++    return release;
++}
+diff --git a/modules/video_output/android/pacing.h b/modules/video_output/android/pacing.h
+new file mode 100644
+index 0000000000..20324342d6
+--- /dev/null
++++ b/modules/video_output/android/pacing.h
+@@ -0,0 +1,66 @@
++/*****************************************************************************
++ * pacing.h: smooth and vsync-align Android video release times
++ *****************************************************************************
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++#ifndef VLC_ANDROID_PACING_H
++#define VLC_ANDROID_PACING_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++#define ANDROID_PACING_SYNC_FRAMES 15
++
++struct android_frame_matcher
++{
++    int64_t first_pts;
++    int64_t first_duration;
++    int64_t last_pts;
++    int64_t count;
++    int64_t matching_count;
++    int64_t matching_sum;
++    bool outliers[ANDROID_PACING_SYNC_FRAMES];
++    unsigned outlier_count;
++};
++
++struct android_pacing
++{
++    struct android_frame_matcher matchers[2];
++    struct android_frame_matcher *current, *candidate;
++    bool candidate_active;
++    int64_t last_pts;
++
++    bool anchored;
++    int64_t anchor_pts;
++    int64_t anchor_smooth;
++
++    int64_t hysteresis;
++
++    int64_t cached_pts;
++    int64_t cached_date;
++    int64_t cached_offset;
++    int64_t cached_release;
++};
++
++void android_pacing_Init(struct android_pacing *);
++
++/* All times in nanoseconds on CLOCK_MONOTONIC, except pts which is the
++ * picture timestamp in nanoseconds. vsync_period <= 0 disables snapping. */
++int64_t android_pacing_Adjust(struct android_pacing *, int64_t pts,
++                              int64_t date, int64_t vsync_time,
++                              int64_t vsync_period);
++
++#endif
+diff --git a/modules/video_output/android/vsync.c b/modules/video_output/android/vsync.c
+new file mode 100644
+index 0000000000..78bf43a1ee
+--- /dev/null
++++ b/modules/video_output/android/vsync.c
+@@ -0,0 +1,244 @@
++/*****************************************************************************
++ * vsync.c: sample the vsync timeline the app's frames are presented on
++ *****************************************************************************
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++#ifdef HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <dlfcn.h>
++#include <pthread.h>
++#include <stdatomic.h>
++#include <time.h>
++
++#include <android/choreographer.h>
++#include <android/looper.h>
++
++#include "vsync.h"
++
++#define SAMPLE_INTERVAL_NS INT64_C(500000000)
++#define MAX_SAMPLE_AGE_NS INT64_C(2000000000)
++
++static struct
++{
++    AChoreographer *(*getInstance)(void);
++    void (*postFrameCallback64)(AChoreographer *,
++                                AChoreographer_frameCallback64, void *);
++    void (*postVsyncCallback)(AChoreographer *,
++                              AChoreographer_vsyncCallback, void *);
++    void (*registerRefreshRateCallback)(AChoreographer *,
++                                        AChoreographer_refreshRateCallback,
++                                        void *);
++    size_t (*getFrameTimelinesLength)(const AChoreographerFrameCallbackData *);
++    int64_t (*getExpectedPresentationTimeNanos)(
++            const AChoreographerFrameCallbackData *, size_t);
++} api;
++
++/* One sampler for the process: the NDK Choreographer belongs to the thread
++ * that created it and is never torn down, so a thread per display would leak
++ * one each time. Between users it sleeps on its looper without callbacks. */
++static struct
++{
++    pthread_once_t once;
++    pthread_mutex_t lock;
++    pthread_cond_t ready;
++    bool started, available;
++    ALooper *looper;
++    AChoreographer *choreographer;
++
++    atomic_uint users;
++    _Atomic int64_t time, period;
++
++    /* only touched on the sampler thread */
++    bool posted, resample;
++    int64_t pair_first;
++    int64_t next_sample;
++} sampler = {
++    .once = PTHREAD_ONCE_INIT,
++    .lock = PTHREAD_MUTEX_INITIALIZER,
++    .ready = PTHREAD_COND_INITIALIZER,
++};
++
++static int64_t Now(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return ts.tv_sec * INT64_C(1000000000) + ts.tv_nsec;
++}
++
++static void Publish(int64_t time, int64_t period)
++{
++    atomic_store_explicit(&sampler.period, period, memory_order_relaxed);
++    atomic_store_explicit(&sampler.time, time, memory_order_release);
++}
++
++static void SampleLater(void)
++{
++    sampler.posted = false;
++    sampler.next_sample = sampler.resample ? 0 : Now() + SAMPLE_INTERVAL_NS;
++    sampler.resample = false;
++}
++
++static void OnVsync(const AChoreographerFrameCallbackData *data, void *opaque)
++{
++    (void) opaque;
++    /* The timelines are spaced by the rate SurfaceFlinger grants the app,
++     * which is what its buffers are latched on, not the panel's. */
++    if (api.getFrameTimelinesLength(data) >= 2)
++    {
++        int64_t first = api.getExpectedPresentationTimeNanos(data, 0);
++        int64_t second = api.getExpectedPresentationTimeNanos(data, 1);
++        if (second > first)
++            Publish(first, second - first);
++    }
++    SampleLater();
++}
++
++static void OnFrame(int64_t frame_time, void *opaque)
++{
++    (void) opaque;
++    if (sampler.pair_first == 0)
++    {
++        sampler.pair_first = frame_time;
++        api.postFrameCallback64(sampler.choreographer, OnFrame, NULL);
++        return;
++    }
++    if (frame_time > sampler.pair_first)
++        Publish(frame_time, frame_time - sampler.pair_first);
++    sampler.pair_first = 0;
++    SampleLater();
++}
++
++static void OnRefreshRate(int64_t period, void *opaque)
++{
++    (void) period; (void) opaque;
++    Publish(0, 0);
++    if (sampler.posted)
++        sampler.resample = true;
++    else
++        sampler.next_sample = 0;
++}
++
++static void Post(void)
++{
++    sampler.posted = true;
++    if (api.postVsyncCallback != NULL)
++        api.postVsyncCallback(sampler.choreographer, OnVsync, NULL);
++    else
++    {
++        sampler.pair_first = 0;
++        api.postFrameCallback64(sampler.choreographer, OnFrame, NULL);
++    }
++}
++
++static void *Run(void *data)
++{
++    (void) data;
++    ALooper *looper = ALooper_prepare(0);
++    AChoreographer *choreographer = api.getInstance();
++
++    pthread_mutex_lock(&sampler.lock);
++    sampler.looper = looper;
++    sampler.choreographer = choreographer;
++    sampler.available = choreographer != NULL;
++    sampler.started = true;
++    pthread_cond_signal(&sampler.ready);
++    pthread_mutex_unlock(&sampler.lock);
++    if (choreographer == NULL)
++        return NULL;
++
++    if (api.registerRefreshRateCallback != NULL)
++        api.registerRefreshRateCallback(choreographer, OnRefreshRate, NULL);
++
++    for (;;)
++    {
++        int timeout = -1;
++        if (atomic_load(&sampler.users) > 0 && !sampler.posted)
++        {
++            int64_t wait = sampler.next_sample - Now();
++            if (wait <= 0)
++                Post();
++            else
++                timeout = wait / 1000000 + 1;
++        }
++        ALooper_pollOnce(timeout, NULL, NULL, NULL);
++    }
++    return NULL;
++}
++
++static void Start(void)
++{
++    void *lib = dlopen("libandroid.so", RTLD_NOW);
++    if (lib == NULL)
++        return;
++    api.getInstance = dlsym(lib, "AChoreographer_getInstance");
++    api.postFrameCallback64 = dlsym(lib, "AChoreographer_postFrameCallback64");
++    if (api.getInstance == NULL || api.postFrameCallback64 == NULL)
++        return;
++    api.registerRefreshRateCallback =
++        dlsym(lib, "AChoreographer_registerRefreshRateCallback");
++    api.postVsyncCallback = dlsym(lib, "AChoreographer_postVsyncCallback");
++    api.getFrameTimelinesLength =
++        dlsym(lib, "AChoreographerFrameCallbackData_getFrameTimelinesLength");
++    api.getExpectedPresentationTimeNanos = dlsym(lib,
++        "AChoreographerFrameCallbackData_getFrameTimelineExpectedPresentationTimeNanos");
++    if (api.getFrameTimelinesLength == NULL
++     || api.getExpectedPresentationTimeNanos == NULL)
++        api.postVsyncCallback = NULL;
++
++    pthread_t thread;
++    pthread_attr_t attr;
++    pthread_attr_init(&attr);
++    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
++    if (pthread_create(&thread, &attr, Run, NULL) != 0)
++    {
++        pthread_attr_destroy(&attr);
++        return;
++    }
++    pthread_attr_destroy(&attr);
++
++    pthread_mutex_lock(&sampler.lock);
++    while (!sampler.started)
++        pthread_cond_wait(&sampler.ready, &sampler.lock);
++    pthread_mutex_unlock(&sampler.lock);
++}
++
++bool android_vsync_Hold(void)
++{
++    pthread_once(&sampler.once, Start);
++    if (!sampler.available)
++        return false;
++    if (atomic_fetch_add(&sampler.users, 1) == 0)
++    {
++        /* a sample left from an earlier user may predate a mode change */
++        Publish(0, 0);
++        ALooper_wake(sampler.looper);
++    }
++    return true;
++}
++
++void android_vsync_Release(void)
++{
++    atomic_fetch_sub(&sampler.users, 1);
++}
++
++bool android_vsync_Get(int64_t *time, int64_t *period)
++{
++    *time = atomic_load_explicit(&sampler.time, memory_order_acquire);
++    *period = atomic_load_explicit(&sampler.period, memory_order_relaxed);
++    return *period > 0 && Now() - *time < MAX_SAMPLE_AGE_NS;
++}
+diff --git a/modules/video_output/android/vsync.h b/modules/video_output/android/vsync.h
+new file mode 100644
+index 0000000000..8a6556c15f
+--- /dev/null
++++ b/modules/video_output/android/vsync.h
+@@ -0,0 +1,31 @@
++/*****************************************************************************
++ * vsync.h: sample the vsync timeline the app's frames are presented on
++ *****************************************************************************
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++#ifndef VLC_ANDROID_VSYNC_H
++#define VLC_ANDROID_VSYNC_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++bool android_vsync_Hold(void);
++void android_vsync_Release(void);
++
++/* A vsync time and period, in nanoseconds on CLOCK_MONOTONIC. */
++bool android_vsync_Get(int64_t *time, int64_t *period);
++
++#endif
+diff --git a/modules/video_output/meson.build b/modules/video_output/meson.build
+index 9d9e83c701..381d01ecf0 100644
+--- a/modules/video_output/meson.build
++++ b/modules/video_output/meson.build
+@@ -94,7 +94,7 @@ if host_system == 'android'
+     )
+     vlc_modules += {
+         'name' : 'android_display',
+-        'sources' : [files('android/display.c'), android_gl_sources],
++        'sources' : [files('android/display.c', 'android/pacing.c', 'android/vsync.c'), android_gl_sources],
+         'c_args' : ['-DUSE_OPENGL_ES2'],
+         'include_directories' : [vlc_include_dirs],
+         'link_with' : [libandroid_utils, libandroid_env],
+-- 
+2.56.0
+

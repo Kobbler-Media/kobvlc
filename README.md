@@ -27,6 +27,7 @@ Everything VideoLAN publishes stays theirs. This repo only holds what differs.
 | decoder device: let the user pick the device node | With more than one GPU, VA-API decoded on whichever render node it found first. `dec-dev-path` names the one to open. |
 | libvlc: let the app choose the decoder device | A player drawing through video callbacks always decoded in software. `libvlc_video_set_decoder_device()` picks the module and node per player, and a reused vout reopens its device when the choice changes. |
 | aaudio: open the stream at the source sample rate | Unspecified, AAudio offered the device's 96kHz on a Pixel 10 and VLC resampled every 48kHz track up for AudioFlinger to bring back down. |
+| android display: pace release times to the vsync | Each picture asked SurfaceFlinger for the date its millisecond timestamp gave it. Held to 24Hz at 120Hz, a Pixel 6 Pro latched a request a fraction of a millisecond late a whole frame later, and every few seconds a burst of held and dropped frames went by. Release times are now fitted to the frame duration and moved onto the closest vsync, as Media3 does. |
 
 `patches/libvlcjni/`:
 
