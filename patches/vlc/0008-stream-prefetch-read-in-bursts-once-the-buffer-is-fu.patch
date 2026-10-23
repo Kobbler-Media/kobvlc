@@ -1,0 +1,123 @@
+From d38c6d2e1b7c5edcc325e65a9dd656178ea7fd3d Mon Sep 17 00:00:00 2001
+Message-Id: <d38c6d2e1b7c5edcc325e65a9dd656178ea7fd3d.1792711308.git.dev@kobbler.invalid>
+In-Reply-To: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
+References: <8bbee53215a2fe1b7845ec38b3385347f5d6aa41.1791977240.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Fri, 23 Oct 2026 10:21:48 +1100
+Subject: [PATCH 8/8] stream: prefetch: read in bursts once the buffer is full
+
+Once the buffer had filled, every read that freed space in it was answered
+straight away with a read from the source of the same size, so a network
+stream arrived as a steady trickle at its bitrate for as long as it played.
+A 4 Mbps film read half a megabyte every second, and a Wi-Fi or cellular
+interface given traffic every second never drops into its power saving
+states. Players built on ExoPlayer read the opposite way: up to a target,
+then nothing until the buffer has drained.
+
+Add prefetch-refill-level: once the buffer is full of unread data, the
+thread leaves the source alone until the unread data has fallen to that
+percentage of the buffer, then fills it again in one go. The default of
+100 keeps the current behaviour. A source left idle long enough to be
+dropped by the server is resumed where it stopped by the HTTP access, as
+any other short response is.
+---
+ modules/stream_filter/prefetch.c | 31 ++++++++++++++++++++++++++++++-
+ 1 file changed, 30 insertions(+), 1 deletion(-)
+
+diff --git a/modules/stream_filter/prefetch.c b/modules/stream_filter/prefetch.c
+index cc7b9a1182..83f06ea66d 100644
+--- a/modules/stream_filter/prefetch.c
++++ b/modules/stream_filter/prefetch.c
+@@ -75,6 +75,8 @@ typedef struct
+     size_t       buffer_size;
+     char        *buffer;
+     size_t       seek_threshold;
++    size_t       refill_level;
++    bool         topped_up;
+ 
+     struct stream_ctrl *controls;
+ } stream_sys_t;
+@@ -170,6 +172,7 @@ static void *Thread(void *data)
+             {
+                 sys->buffer_offset = stream_offset;
+                 sys->buffer_length = 0;
++                sys->topped_up = false;
+                 assert(!sys->error);
+                 sys->eof = false;
+             }
+@@ -206,6 +209,7 @@ static void *Thread(void *data)
+             {
+                 sys->buffer_offset = stream_offset;
+                 sys->buffer_length = 0;
++                sys->topped_up = false;
+                 assert(!sys->error);
+                 assert(!sys->eof);
+             }
+@@ -223,11 +227,26 @@ static void *Thread(void *data)
+ 
+         assert(sys->buffer_size >= sys->buffer_length);
+ 
++        if (sys->topped_up)
++        {   /* Leave the source idle until the unread data has drained, so that
++             * it is read in bursts rather than trickled in as it is consumed. */
++            size_t unread = history < sys->buffer_length
++                          ? sys->buffer_length - history : 0;
++
++            if (unread > sys->refill_level)
++            {
++                vlc_cond_wait(&sys->wait_space, &sys->lock);
++                continue;
++            }
++            sys->topped_up = false;
++        }
++
+         size_t len = sys->buffer_size - sys->buffer_length;
+         if (len == 0)
+         {   /* Buffer is full */
+             if (history == 0)
+             {   /* Wait for data to be read */
++                sys->topped_up = true;
+                 vlc_cond_wait(&sys->wait_space, &sys->lock);
+                 continue;
+             }
+@@ -472,6 +491,7 @@ static int Open(vlc_object_t *obj)
+     sys->buffer_length = 0;
+     sys->buffer_size = var_InheritInteger(obj, "prefetch-buffer-size") << 10u;
+     sys->seek_threshold = var_InheritInteger(obj, "prefetch-seek-threshold");
++    sys->topped_up = false;
+     sys->controls = NULL;
+ 
+     uint64_t size = stream_Size(stream->s);
+@@ -480,6 +500,8 @@ static int Open(vlc_object_t *obj)
+         if (sys->buffer_size > size)
+             sys->buffer_size = size;
+     }
++    sys->refill_level = sys->buffer_size / 100
++                      * var_InheritInteger(obj, "prefetch-refill-level");
+ 
+     sys->buffer = malloc(sys->buffer_size);
+     if (sys->buffer == NULL)
+@@ -501,7 +523,8 @@ static int Open(vlc_object_t *obj)
+         goto error;
+     }
+ 
+-    msg_Dbg(stream, "using %zu bytes buffer", sys->buffer_size);
++    msg_Dbg(stream, "using %zu bytes buffer, refilled below %zu bytes",
++            sys->buffer_size, sys->refill_level);
+     stream->pf_read = Read;
+     stream->pf_seek = Seek;
+     stream->pf_control = Control;
+@@ -556,4 +579,10 @@ vlc_module_begin()
+     add_integer("prefetch-seek-threshold", 1 << 14, N_("Seek threshold"),
+                 N_("Prefetch forward seek threshold (bytes)"))
+         change_integer_range(0, UINT64_C(1) << 60)
++    add_integer("prefetch-refill-level", 100, N_("Refill level"),
++                N_("Once the buffer is full, wait for the unread data to fall "
++                   "to this percentage of it before reading again. Lower "
++                   "values read in fewer, larger bursts, which lets a "
++                   "network interface sleep in between."))
++        change_integer_range(0, 100)
+ vlc_module_end()
+-- 
+2.56.0
+

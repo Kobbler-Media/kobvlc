@@ -28,6 +28,7 @@ Everything VideoLAN publishes stays theirs. This repo only holds what differs.
 | libvlc: let the app choose the decoder device | A player drawing through video callbacks always decoded in software. `libvlc_video_set_decoder_device()` picks the module and node per player, and a reused vout reopens its device when the choice changes. |
 | aaudio: open the stream at the source sample rate | Unspecified, AAudio offered the device's 96kHz on a Pixel 10 and VLC resampled every 48kHz track up for AudioFlinger to bring back down. |
 | android display: pace release times to the vsync | Each picture asked SurfaceFlinger for the date its millisecond timestamp gave it. Held to 24Hz at 120Hz, a Pixel 6 Pro latched a request a fraction of a millisecond late a whole frame later, and every few seconds a burst of held and dropped frames went by. Release times are now fitted to the frame duration and moved onto the closest vsync, as Media3 does. |
+| stream prefetch: read in bursts once the buffer is full | Once full, the buffer was topped up by every read that freed space in it, so a network stream trickled in at its bitrate for the whole title and the Wi-Fi or cellular radio never got to sleep. `prefetch-refill-level` leaves the source idle until the unread data has drained to that share of the buffer, then refills it in one burst, as ExoPlayer does. kobapp sets it, and the buffer size, per player. |
 
 `patches/libvlcjni/`:
 
