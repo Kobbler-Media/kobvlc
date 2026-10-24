@@ -22,13 +22,16 @@ Everything VideoLAN publishes stays theirs. This repo only holds what differs.
 | Patch | Why |
 |---|---|
 | android display: release the window surface on close | The player keeps a vout for the next video. Without this, a vout reused after the app's surface was replaced (backgrounding, leaving the player) drew into the dead surface and the picture stayed black. The GL and Vulkan displays already did this. |
-| http: stop the old transfer before seeking | Over HTTP/2 the response to a seek queued behind the abandoned transfer's data; opening a Matroska file waited over a second on the jump to its cues. |
+| http: stop the old transfer before seeking | Over HTTP/2 the response to a seek queued behind the abandoned transfer's data; opening a Matroska file waited over a second on the jump to its cues. The old response's headers are kept, so the new request is still validated against its ETag. |
 | mediacodec: find the decoder without probing every codec | Every stream open asked every codec on the device for capabilities it did not have, and threw for each. Several hundred ms per open on a Chromecast; now looked up once. |
 | decoder device: let the user pick the device node | With more than one GPU, VA-API decoded on whichever render node it found first. `dec-dev-path` names the one to open. |
 | libvlc: let the app choose the decoder device | A player drawing through video callbacks always decoded in software. `libvlc_video_set_decoder_device()` picks the module and node per player, and a reused vout reopens its device when the choice changes. |
 | aaudio: open the stream at the source sample rate | Unspecified, AAudio offered the device's 96kHz on a Pixel 10 and VLC resampled every 48kHz track up for AudioFlinger to bring back down. |
 | android display: pace release times to the vsync | Each picture asked SurfaceFlinger for the date its millisecond timestamp gave it. Held to 24Hz at 120Hz, a Pixel 6 Pro latched a request a fraction of a millisecond late a whole frame later, and every few seconds a burst of held and dropped frames went by. Release times are now fitted to the frame duration and moved onto the closest vsync, as Media3 does. |
 | stream prefetch: read in bursts once the buffer is full | Once full, the buffer was topped up by every read that freed space in it, so a network stream trickled in at its bitrate for the whole title and the Wi-Fi or cellular radio never got to sleep. `prefetch-refill-level` leaves the source idle until the unread data has drained to that share of the buffer, then refills it in one burst, as ExoPlayer does. kobapp sets it, and the buffer size, per player. |
+| http/2: refuse new streams once the connection has shut down | A server closing an idle connection left it cached, and the next request on it (the resume after a burst's idle stretch, or a seek) waited forever for a reply nothing was left to receive. Playback froze with no buffering shown. |
+| http: do not resume reading for a reader being stopped | The resume after an interrupted read could wait out of the interrupt's reach on a dead connection, and the input never stopped. |
+| http: notice connections whose peer stopped acknowledging | A connection lost without a word (NAT, Wi-Fi) was never noticed. TCP keep-alive (also running between read-ahead bursts) and an 8s limit on unacknowledged data fail it within about ten seconds, inside what the player has buffered, and the transfer resumes on a new connection. |
 
 `patches/libvlcjni/`:
 

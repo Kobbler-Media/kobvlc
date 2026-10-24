@@ -1,0 +1,106 @@
+From b4543828ce3fc26b33d0a43a1b04cecd0b89302f Mon Sep 17 00:00:00 2001
+Message-Id: <b4543828ce3fc26b33d0a43a1b04cecd0b89302f.1792809858.git.dev@kobbler.invalid>
+In-Reply-To: <c4889cf191dc9761480d7bdfa95689fee684e027.1792809858.git.dev@kobbler.invalid>
+References: <c4889cf191dc9761480d7bdfa95689fee684e027.1792809858.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Sat, 24 Oct 2026 13:44:07 +1100
+Subject: [PATCH 10/11] http: file: do not resume reading for a reader being
+ stopped
+
+A read that fails is resumed with a new request. When the reader is being
+stopped, the read failed because it was interrupted, and the new request
+is unwanted: on a connection that went quiet, it waits for its reply
+beyond the reach of the interrupt, as the interrupt has already been
+consumed, and the input cannot stop.
+---
+ modules/access/http/file.c      |  8 ++++++--
+ modules/access/http/file_test.c | 26 ++++++++++++++++++++++++++
+ 2 files changed, 32 insertions(+), 2 deletions(-)
+
+diff --git a/modules/access/http/file.c b/modules/access/http/file.c
+index 2dca687b4b..f1a8c63e65 100644
+--- a/modules/access/http/file.c
++++ b/modules/access/http/file.c
+@@ -31,6 +31,7 @@
+ #include <string.h>
+ 
+ #include <vlc_common.h>
++#include <vlc_interrupt.h>
+ #include <vlc_block.h>
+ #include <vlc_strings.h>
+ #include "message.h"
+@@ -245,8 +246,11 @@ block_t *vlc_http_file_read(struct vlc_http_resource *res)
+     if (block == vlc_http_error)
+         block = NULL;
+ 
+-    /* Automatically resume on short response or error if possible */
+-    if (block == NULL && res->response != NULL
++    /* Automatically resume on short response or error if possible, but not
++     * for a reader that is being stopped: the read it was woken from has
++     * failed, and a new request on a connection that went quiet waits for its
++     * reply beyond the reach of the interrupt. */
++    if (block == NULL && !vlc_killed() && res->response != NULL
+      && vlc_http_msg_can_seek(res->response)
+      && file->offset < vlc_http_msg_get_file_size(res->response)
+      && vlc_http_file_seek(res, file->offset) == 0)
+diff --git a/modules/access/http/file_test.c b/modules/access/http/file_test.c
+index 4329493563..7a35818681 100644
+--- a/modules/access/http/file_test.c
++++ b/modules/access/http/file_test.c
+@@ -31,6 +31,7 @@
+ 
+ #include <vlc_common.h>
+ #include <vlc_http.h>
++#include <vlc_interrupt.h>
+ #include "resource.h"
+ #include "file.h"
+ #include "message.h"
+@@ -48,6 +49,7 @@ static uintmax_t offset = 0;
+ static bool secure = true;
+ static bool etags = false;
+ static int lang = -1;
++static unsigned requests = 0;
+ 
+ static vlc_http_cookie_jar_t *jar;
+ 
+@@ -135,6 +137,29 @@ int main(void)
+     assert(vlc_http_file_read(f) == NULL);
+     vlc_http_file_destroy(f);
+ 
++    /* No resuming for a reader that has been stopped */
++    replies[0] = "HTTP/1.1 206 Partial Content\r\n"
++                 "Content-Range: bytes 0-2344/2345\r\n"
++                 "ETag: W/\"foobar42\"\r\n"
++                 "Last-Modified: Mon, 21 Oct 2013 20:13:22 GMT\r\n"
++                 "\r\n";
++    offset = 0;
++    etags = false;
++    f = vlc_http_file_create(NULL, url, ua, NULL);
++    assert(f != NULL);
++    assert(vlc_http_file_can_seek(f));
++
++    vlc_interrupt_t *ctx = vlc_interrupt_create();
++    assert(ctx != NULL);
++    vlc_interrupt_set(ctx);
++    vlc_interrupt_kill(ctx);
++    requests = 0;
++    assert(vlc_http_file_read(f) == NULL);
++    assert(requests == 0);
++    vlc_interrupt_set(NULL);
++    vlc_interrupt_destroy(ctx);
++    vlc_http_file_destroy(f);
++
+     /* Redirect */
+     replies[0] = "HTTP/1.1 301 Permanent Redirect\r\n"
+                  "Location: /somewhere/else/#here\r\n"
+@@ -342,6 +367,7 @@ struct vlc_http_msg *vlc_http_mgr_request(struct vlc_http_mgr *mgr, bool https,
+     const char *str;
+     char *end;
+ 
++    requests++;
+     assert(https == secure);
+     assert(mgr == NULL);
+     assert(!strcmp(host, "www.example.com"));
+-- 
+2.56.0
+

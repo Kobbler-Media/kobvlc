@@ -1,0 +1,64 @@
+From e7c4088287ba8b8c696d19fe651d6030022a63ba Mon Sep 17 00:00:00 2001
+Message-Id: <e7c4088287ba8b8c696d19fe651d6030022a63ba.1792809858.git.dev@kobbler.invalid>
+In-Reply-To: <c4889cf191dc9761480d7bdfa95689fee684e027.1792809858.git.dev@kobbler.invalid>
+References: <c4889cf191dc9761480d7bdfa95689fee684e027.1792809858.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Sat, 24 Oct 2026 13:44:07 +1100
+Subject: [PATCH 09/11] http: h2conn: refuse new streams once the connection
+ has shut down
+
+When the peer closes the connection, or it fails, the receive thread
+resets the streams open at that time and exits. The connection manager
+still holds the connection, though, and a request reusing it opened a
+stream that waited for its reply headers forever, as nothing was left to
+receive them. A media player resuming a transfer after the server had
+closed its idle connection froze there.
+
+Out of stream identifiers, the connection now refuses new streams, and
+the connection manager opens a new connection instead.
+---
+ modules/access/http/h2conn.c      |  4 ++++
+ modules/access/http/h2conn_test.c | 13 +++++++++++++
+ 2 files changed, 17 insertions(+)
+
+diff --git a/modules/access/http/h2conn.c b/modules/access/http/h2conn.c
+index 561f7ae2a3..b172cbe031 100644
+--- a/modules/access/http/h2conn.c
++++ b/modules/access/http/h2conn.c
+@@ -827,6 +827,10 @@ static void *vlc_h2_recv_thread(void *data)
+ fail:
+     /* Terminate any remaining stream */
+     vlc_mutex_lock(&conn->lock);
++    /* Nothing is left to receive a reply: a stream opened from now on would
++     * wait for its headers forever, so refuse new ones and let the connection
++     * manager open a new connection instead. */
++    conn->next_id = 0x80000000;
+     for (struct vlc_h2_stream *s = conn->streams; s != NULL; s = s->older)
+         vlc_h2_stream_reset(s, VLC_H2_CANCEL);
+     vlc_mutex_unlock(&conn->lock);
+diff --git a/modules/access/http/h2conn_test.c b/modules/access/http/h2conn_test.c
+index 3eebc33177..e313bf8216 100644
+--- a/modules/access/http/h2conn_test.c
++++ b/modules/access/http/h2conn_test.c
+@@ -319,5 +319,18 @@ int main(void)
+     conn_destroy();
+     vlc_http_stream_close(s, false);
+ 
++    /* Test stream after the peer closed the connection */
++    conn_create();
++    s = stream_open(false);
++    assert(s != NULL);
++    conn_expect(HEADERS);
++    vlc_tls_Shutdown(external_tls, false);
++    m = vlc_http_stream_read_headers(s);
++    assert(m == NULL);
++    vlc_http_stream_close(s, false);
++    assert(stream_open(false) == NULL);
++    vlc_http_conn_release(conn);
++    vlc_tls_SessionDelete(external_tls);
++
+     return 0;
+ }
+-- 
+2.56.0
+

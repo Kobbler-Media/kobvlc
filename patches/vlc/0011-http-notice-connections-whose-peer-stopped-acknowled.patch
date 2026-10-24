@@ -1,0 +1,122 @@
+From 7b2bad34f5d55b3b5cdc33cb090ece02c33ecd65 Mon Sep 17 00:00:00 2001
+Message-Id: <7b2bad34f5d55b3b5cdc33cb090ece02c33ecd65.1792813965.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Sat, 24 Oct 2026 13:44:07 +1100
+Subject: [PATCH] http: notice connections whose peer stopped acknowledging
+
+A connection that dies without a word, as when a NAT mapping or the Wi-Fi
+network it went through is gone, is never noticed: a read waits for data
+forever, and a request written into it waits forever for its reply. Once
+read ahead in bursts, a stream leaves its connection idle for a minute or
+more at a time, and a connection lost in the meantime froze playback for
+good.
+
+Keep-alive probes after five seconds of silence, and an eight second limit
+on data left unacknowledged, have the system fail the connection within
+about ten seconds instead, and the transfer is resumed on a new one. As
+the probes also run between bursts, a connection lost while idle is
+usually replaced before the next burst needs it. A peer that is merely
+slow to answer still acknowledges, so is not cut short.
+---
+ modules/access/http/conn.h    |  6 ++++++
+ modules/access/http/connmgr.c | 34 ++++++++++++++++++++++++++++++++++
+ modules/access/http/h1conn.c  |  1 +
+ modules/access/http/h2conn.c  |  1 +
+ 4 files changed, 42 insertions(+)
+
+diff --git a/modules/access/http/conn.h b/modules/access/http/conn.h
+index ff390d054c..160118ad62 100644
+--- a/modules/access/http/conn.h
++++ b/modules/access/http/conn.h
+@@ -56,6 +56,12 @@ static inline void vlc_http_conn_release(struct vlc_http_conn *conn)
+     conn->cbs->release(conn);
+ }
+ 
++/**
++ * Has the operating system give up on the connection of a TLS session (or
++ * plain socket) once its peer has stopped acknowledging.
++ */
++void vlc_http_conn_watch(struct vlc_tls *);
++
+ void vlc_http_err(void *, const char *msg, ...) VLC_FORMAT(2, 3);
+ void vlc_http_dbg(void *, const char *msg, ...) VLC_FORMAT(2, 3);
+ 
+diff --git a/modules/access/http/connmgr.c b/modules/access/http/connmgr.c
+index ca734853fc..2f835b6f9b 100644
+--- a/modules/access/http/connmgr.c
++++ b/modules/access/http/connmgr.c
+@@ -23,6 +23,9 @@
+ #endif
+ 
+ #include <assert.h>
++#ifdef HAVE_NETINET_TCP_H
++# include <netinet/tcp.h>
++#endif
+ #include <vlc_common.h>
+ #include <vlc_network.h>
+ #include <vlc_tls.h>
+@@ -56,6 +59,37 @@ void vlc_http_dbg(void *ctx, const char *fmt, ...)
+     va_end(ap);
+ }
+ 
++void vlc_http_conn_watch(struct vlc_tls *tls)
++{
++    int fd = vlc_tls_GetFD(tls);
++
++    /* A connection that dies without a word (a NAT mapping or Wi-Fi network
++     * gone, a peer that lost power) is otherwise never noticed: a read waits
++     * for data forever, and a request written into it waits forever for its
++     * reply. Probed once it falls quiet, and given up on once anything sent
++     * has gone unacknowledged for eight seconds, it fails within about ten
++     * and the transfer resumes on a new connection: inside what a media
++     * player has buffered. Probing between bursts of reading mostly finds a
++     * dead connection before anything waits on it. Peers that are merely
++     * slow to answer still acknowledge, so this does not cut them short. */
++    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &(int){ 1 }, sizeof (int));
++#ifdef TCP_KEEPIDLE
++    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &(int){ 5 }, sizeof (int));
++#elif defined(TCP_KEEPALIVE)
++    setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &(int){ 5 }, sizeof (int));
++#endif
++#ifdef TCP_KEEPINTVL
++    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &(int){ 2 }, sizeof (int));
++#endif
++#ifdef TCP_KEEPCNT
++    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &(int){ 4 }, sizeof (int));
++#endif
++#ifdef TCP_USER_TIMEOUT
++    setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &(unsigned){ 8000 },
++               sizeof (unsigned));
++#endif
++}
++
+ vlc_tls_t *vlc_https_connect(vlc_tls_client_t *creds, const char *name,
+                              unsigned port, bool *restrict two)
+ {
+diff --git a/modules/access/http/h1conn.c b/modules/access/http/h1conn.c
+index 930f5a5fac..d71dd91270 100644
+--- a/modules/access/http/h1conn.c
++++ b/modules/access/http/h1conn.c
+@@ -354,6 +354,7 @@ struct vlc_http_conn *vlc_h1_conn_create(void *ctx, vlc_tls_t *tls, bool proxy)
+ 
+     conn->conn.cbs = &vlc_h1_conn_callbacks;
+     conn->conn.tls = tls;
++    vlc_http_conn_watch(tls);
+     conn->stream.cbs = &vlc_h1_stream_callbacks;
+     conn->active = false;
+     conn->released = false;
+diff --git a/modules/access/http/h2conn.c b/modules/access/http/h2conn.c
+index b172cbe031..bd083a6eb3 100644
+--- a/modules/access/http/h2conn.c
++++ b/modules/access/http/h2conn.c
+@@ -883,6 +883,7 @@ struct vlc_http_conn *vlc_h2_conn_create(void *ctx, struct vlc_tls *tls)
+ 
+     conn->conn.cbs = &vlc_h2_conn_callbacks;
+     conn->conn.tls = tls;
++    vlc_http_conn_watch(tls);
+     conn->out = vlc_h2_output_create(tls, true);
+     conn->opaque = ctx;
+     conn->streams = NULL;
+-- 
+2.56.0
+
