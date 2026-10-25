@@ -32,6 +32,7 @@ Everything VideoLAN publishes stays theirs. This repo only holds what differs.
 | http/2: refuse new streams once the connection has shut down | A server closing an idle connection left it cached, and the next request on it (the resume after a burst's idle stretch, or a seek) waited forever for a reply nothing was left to receive. Playback froze with no buffering shown. |
 | http: do not resume reading for a reader being stopped | The resume after an interrupted read could wait out of the interrupt's reach on a dead connection, and the input never stopped. |
 | http: notice connections whose peer stopped acknowledging | A connection lost without a word (NAT, Wi-Fi) was never noticed. TCP keep-alive (also running between read-ahead bursts) and an 8s limit on unacknowledged data fail it within about ten seconds, inside what the player has buffered, and the transfer resumes on a new connection. |
+| android display: keep paced releases on one cadence | The pacing above still put about 100 frames a minute on the wrong vsync on a Pixel 6 Pro at 60Hz. Media3's hysteresis only suits one phase of cadence, and 25fps at 60Hz has five; the frame timelines are spaced at the nominal 16.667ms on a panel running at 16.58ms; and the clock's dates jitter. Vsyncs now come from a line fitted through the last eight seconds of samples, and the clock's distance from the frames is low-pass filtered. `android/test.sh` checks the cadence on simulated panels. |
 
 `patches/libvlcjni/`:
 
@@ -52,6 +53,7 @@ Needs Docker; Android also needs a JDK 21 (`KOBVLC_JAVA_HOME`, default
 android/build.sh             # every ABI, into work/maven
 android/build.sh arm64 arm   # just these, for trying a change on a device
 linux/build.sh               # work/linux/libvlc-linux-x64-<DESKTOP_VERSION>.tar.gz
+android/test.sh              # host tests of the Android patches, on the tree a build patched
 ```
 
 The first build clones the sources into `work/` (and, for Android, downloads the

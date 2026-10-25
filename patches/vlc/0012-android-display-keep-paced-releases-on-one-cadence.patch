@@ -1,0 +1,429 @@
+From fe36a57a910b36778cd30075a50ff187fc6ce0ee Mon Sep 17 00:00:00 2001
+Message-Id: <fe36a57a910b36778cd30075a50ff187fc6ce0ee.1792900000.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Sun, 25 Oct 2026 10:00:00 +1100
+Subject: [PATCH] android: display: keep paced releases on one cadence
+
+On a Pixel 6 Pro held at 60Hz, a 25fps film through the paced display put
+about 100 frames a minute on the wrong vsync, each held one refresh too
+long or hurried one too soon. Three things moved releases near the middle
+of two vsyncs from one to the other:
+
+- The hysteresis taken from Media3 keeps a release that sits halfway on
+  the vsync it had. At a whole or half-whole ratio of refresh to frame rate
+  every such release shares one phase; 25fps at 60Hz, or 24fps on a panel
+  running at 60.3Hz, has five that take turns, and the one shared state
+  flipped between them, deciding frames it was never meant for.
+- The frame timelines are spaced by the nominal period of the granted
+  rate, 16.667ms at 60Hz, while that panel runs at 16.58ms. Extrapolated
+  half a second from a sample, the vsyncs were up to 3.7ms off, and each
+  sample's own prediction scatters by a few hundred microseconds.
+- The clock's date for a picture jitters by a fraction of a millisecond.
+
+Snap to a line fitted through the last eight seconds of vsync samples,
+and follow the clock's distance from the smoothed timestamps through two
+low-pass filters, taking a step of more than 4ms (a seek, a pause,
+another rate) at once. On the same phone a 25fps film went from 102
+frames a minute off their cadence to none, and a 23.976fps episode from
+100 to 4, its slips from 3:2 to 3:3 coming every 23 to 31 frames as the
+rates' beat has them rather than 9 to 49. Simulated across the rates and
+panels above, the misplaced frames go from 8 to 130 a minute to under one
+in five minutes.
+---
+diff --git a/modules/video_output/Makefile.am b/modules/video_output/Makefile.am
+index 7233f3242a..6628583033 100644
+--- a/modules/video_output/Makefile.am
++++ b/modules/video_output/Makefile.am
+@@ -357,6 +357,7 @@ libandroid_window_plugin_la_LIBADD = \
+ libandroid_display_plugin_la_SOURCES = video_output/android/display.c \
+ 	video_output/android/pacing.c video_output/android/pacing.h \
+ 	video_output/android/vsync.c video_output/android/vsync.h \
++	video_output/android/vsync_fit.c video_output/android/vsync_fit.h \
+ 	video_output/opengl/sub_renderer.c \
+ 	video_output/opengl/sub_renderer.h
+ libandroid_display_plugin_la_CFLAGS = $(AM_CFLAGS) $(GLES2_CFLAGS) -DUSE_OPENGL_ES2
+diff --git a/modules/video_output/android/pacing.c b/modules/video_output/android/pacing.c
+index 2624e0ac2e..4793e2ffd2 100644
+--- a/modules/video_output/android/pacing.c
++++ b/modules/video_output/android/pacing.c
+@@ -38,6 +38,10 @@
+ #define MAX_MATCHING_DIFFERENCE_NS 1000000
+ #define VSYNC_OFFSET_PERCENT 80
+ 
++#define CLOCK_JUMP_NS 4000000
++#define CLOCK_AVERAGE_FRAMES 32
++#define CLOCK_FOLLOW_FRAMES 64
++
+ static void MatcherReset(struct android_frame_matcher *m)
+ {
+     memset(m, 0, sizeof(*m));
+@@ -132,7 +136,7 @@ void android_pacing_Init(struct android_pacing *p)
+ {
+     EstimatorReset(p);
+     p->anchored = false;
+-    p->hysteresis = 0;
++    p->clock_locked = false;
+     p->cached_pts = INT64_MIN;
+ }
+ 
+@@ -173,41 +177,32 @@ static int64_t SmoothPts(struct android_pacing *p, int64_t pts)
+     return pts;
+ }
+ 
+-static int64_t SnapToVsync(struct android_pacing *p, int64_t release,
+-                           int64_t vsync_time, int64_t period)
++/* The date the clock gives a picture moves by a fraction of a millisecond
++ * from one picture to the next, and as the frame and refresh rates beat
++ * against each other every release passes the middle of two vsyncs in turn:
++ * snapped as they came, those near it went back and forth between the two.
++ * The distance from the smoothed timestamps to the date is filtered twice,
++ * so it follows the clock's drift without its jitter. A step, as after a
++ * seek, a pause or at another rate, is taken at once. */
++static int64_t SteadyOffset(struct android_pacing *p, int64_t offset)
+ {
+-    int64_t count = (release - vsync_time) / period;
+-    int64_t snapped = vsync_time + period * count;
+-    int64_t before, after;
+-    if (release <= snapped)
+-    {
+-        before = snapped - period;
+-        after = snapped;
+-    }
+-    else
++    if (!p->clock_locked || llabs(offset - p->clock_offset) > CLOCK_JUMP_NS)
+     {
+-        before = snapped;
+-        after = snapped + period;
++        p->clock_locked = true;
++        p->clock_average = p->clock_offset = offset;
++        return offset;
+     }
+-    int64_t after_diff = after - release;
+-    int64_t before_diff = release - before;
+ 
+-    /* Hysteresis keeps a release that sits halfway between two vsyncs on the
+-     * one it had, rather than flipping on every bit of residual jitter. */
+-    int64_t diffs_diff = llabs(after_diff - before_diff);
+-    if (diffs_diff < period / 2)
+-    {
+-        int64_t range = period / 4;
+-        if (diffs_diff < range)
+-        {
+-            if (p->hysteresis == 0)
+-                p->hysteresis = after_diff < before_diff ? -range : range;
+-        }
+-        else
+-            p->hysteresis = 0;
+-    }
++    p->clock_average += (offset - p->clock_average) / CLOCK_AVERAGE_FRAMES;
++    p->clock_offset += (p->clock_average - p->clock_offset) / CLOCK_FOLLOW_FRAMES;
++    return p->clock_offset;
++}
+ 
+-    return after_diff + p->hysteresis < before_diff ? after : before;
++static int64_t SnapToVsync(int64_t release, int64_t vsync_time, int64_t period)
++{
++    int64_t from_vsync = release - vsync_time + period / 2;
++    int64_t count = from_vsync / period - (from_vsync % period < 0);
++    return vsync_time + period * count;
+ }
+ 
+ int64_t android_pacing_Adjust(struct android_pacing *p, int64_t pts,
+@@ -218,12 +213,18 @@ int64_t android_pacing_Adjust(struct android_pacing *p, int64_t pts,
+     if (pts == p->cached_pts && date == p->cached_date)
+         return p->cached_release;
+ 
++    int64_t release;
+     if (pts != p->cached_pts)
+-        p->cached_offset = SmoothPts(p, pts) - pts;
+-    int64_t release = date + p->cached_offset;
++    {
++        int64_t smooth = SmoothPts(p, pts);
++        release = smooth + SteadyOffset(p, date - smooth);
++        p->cached_offset = release - date;
++    }
++    else
++        release = date + p->cached_offset;
+ 
+     if (vsync_period > 0)
+-        release = SnapToVsync(p, release, vsync_time, vsync_period)
++        release = SnapToVsync(release, vsync_time, vsync_period)
+                 - vsync_period * VSYNC_OFFSET_PERCENT / 100;
+ 
+     p->cached_pts = pts;
+diff --git a/modules/video_output/android/pacing.h b/modules/video_output/android/pacing.h
+index 20324342d6..5d2daa79b6 100644
+--- a/modules/video_output/android/pacing.h
++++ b/modules/video_output/android/pacing.h
+@@ -47,7 +47,9 @@ struct android_pacing
+     int64_t anchor_pts;
+     int64_t anchor_smooth;
+ 
+-    int64_t hysteresis;
++    bool clock_locked;
++    int64_t clock_average;
++    int64_t clock_offset;
+ 
+     int64_t cached_pts;
+     int64_t cached_date;
+diff --git a/modules/video_output/android/vsync.c b/modules/video_output/android/vsync.c
+index 78bf43a1ee..24976a5c4f 100644
+--- a/modules/video_output/android/vsync.c
++++ b/modules/video_output/android/vsync.c
+@@ -29,6 +29,7 @@
+ #include <android/looper.h>
+ 
+ #include "vsync.h"
++#include "vsync_fit.h"
+ 
+ #define SAMPLE_INTERVAL_NS INT64_C(500000000)
+ #define MAX_SAMPLE_AGE_NS INT64_C(2000000000)
+@@ -64,6 +65,7 @@ static struct
+     _Atomic int64_t time, period;
+ 
+     /* only touched on the sampler thread */
++    struct android_vsync_fit fit;
+     bool posted, resample;
+     int64_t pair_first;
+     int64_t next_sample;
+@@ -86,6 +88,14 @@ static void Publish(int64_t time, int64_t period)
+     atomic_store_explicit(&sampler.time, time, memory_order_release);
+ }
+ 
++static void Sample(int64_t time, int64_t timeline_period)
++{
++    int64_t vsync, period;
++    android_vsync_fit_Sample(&sampler.fit, time, timeline_period,
++                             &vsync, &period);
++    Publish(vsync, period);
++}
++
+ static void SampleLater(void)
+ {
+     sampler.posted = false;
+@@ -103,7 +113,7 @@ static void OnVsync(const AChoreographerFrameCallbackData *data, void *opaque)
+         int64_t first = api.getExpectedPresentationTimeNanos(data, 0);
+         int64_t second = api.getExpectedPresentationTimeNanos(data, 1);
+         if (second > first)
+-            Publish(first, second - first);
++            Sample(first, second - first);
+     }
+     SampleLater();
+ }
+@@ -118,7 +128,7 @@ static void OnFrame(int64_t frame_time, void *opaque)
+         return;
+     }
+     if (frame_time > sampler.pair_first)
+-        Publish(frame_time, frame_time - sampler.pair_first);
++        Sample(frame_time, frame_time - sampler.pair_first);
+     sampler.pair_first = 0;
+     SampleLater();
+ }
+@@ -126,6 +136,7 @@ static void OnFrame(int64_t frame_time, void *opaque)
+ static void OnRefreshRate(int64_t period, void *opaque)
+ {
+     (void) period; (void) opaque;
++    android_vsync_fit_Init(&sampler.fit);
+     Publish(0, 0);
+     if (sampler.posted)
+         sampler.resample = true;
+diff --git a/modules/video_output/android/vsync_fit.c b/modules/video_output/android/vsync_fit.c
+new file mode 100644
+index 0000000000..ad604d841a
+--- /dev/null
++++ b/modules/video_output/android/vsync_fit.c
+@@ -0,0 +1,124 @@
++/*****************************************************************************
++ * vsync_fit.c: fit the vsync timeline from sparse Choreographer samples
++ *****************************************************************************
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++/* The frame timelines are spaced by the nominal period of the rate the app is
++ * granted, 16.667ms at 60Hz, while a Pixel 6 Pro panel set to 60Hz runs at
++ * 60.3Hz. Extrapolated half a second from a sample, that put the vsyncs 2.6ms
++ * off, and each sample's own prediction moves by a few hundred microseconds.
++ * Either is enough to move a release that sits near the middle of two vsyncs
++ * onto the other one. A line fitted through the last eight seconds of samples
++ * has neither error. Over half a minute it fell 2ms behind, as the panel's
++ * rate wanders by about one part in ten thousand. */
++
++#ifdef HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <stdlib.h>
++
++#include "vsync_fit.h"
++
++/* Beyond these the samples are not on the timeline being fitted: the rate
++ * changed, or the period it started from was never right. */
++#define MAX_PERIOD_DEVIATION 50 /* 2% */
++#define MAX_PHASE_ERROR .25
++
++void android_vsync_fit_Init(struct android_vsync_fit *f)
++{
++    f->count = 0;
++    f->newest = 0;
++}
++
++static const struct android_vsync_sample *Newest(const struct android_vsync_fit *f)
++{
++    return &f->samples[f->newest];
++}
++
++/* Least squares through the samples, relative to the newest, which keeps the
++ * sums small enough for doubles over any length of playback. */
++static void Fit(const struct android_vsync_fit *f, double *period, double *at_newest)
++{
++    const struct android_vsync_sample *newest = Newest(f);
++    double mean_n = 0., mean_t = 0.;
++    for (unsigned i = 0; i < f->count; i++)
++    {
++        mean_n += f->samples[i].index - newest->index;
++        mean_t += f->samples[i].time - newest->time;
++    }
++    mean_n /= f->count;
++    mean_t /= f->count;
++
++    double nn = 0., nt = 0.;
++    for (unsigned i = 0; i < f->count; i++)
++    {
++        double n = f->samples[i].index - newest->index - mean_n;
++        double t = f->samples[i].time - newest->time - mean_t;
++        nn += n * n;
++        nt += n * t;
++    }
++    *period = nt / nn;
++    *at_newest = mean_t - *period * mean_n;
++}
++
++static void Add(struct android_vsync_fit *f, int64_t index, int64_t time)
++{
++    if (f->count > 0)
++        f->newest = (f->newest + 1) % ANDROID_VSYNC_FIT_SAMPLES;
++    if (f->count < ANDROID_VSYNC_FIT_SAMPLES)
++        f->count++;
++    f->samples[f->newest].index = index;
++    f->samples[f->newest].time = time;
++}
++
++void android_vsync_fit_Sample(struct android_vsync_fit *f, int64_t time,
++                              int64_t timeline_period,
++                              int64_t *vsync, int64_t *period)
++{
++    *vsync = time;
++    *period = timeline_period;
++    if (timeline_period <= 0)
++    {
++        android_vsync_fit_Init(f);
++        return;
++    }
++
++    if (f->count > 0 && time > Newest(f)->time)
++    {
++        double fitted = timeline_period, at_newest = 0.;
++        if (f->count >= 2)
++            Fit(f, &fitted, &at_newest);
++        double position = (time - Newest(f)->time - at_newest) / fitted;
++        int64_t count = (int64_t)(position + .5);
++        double error = position - count;
++        if (count > 0 && error > -MAX_PHASE_ERROR && error < MAX_PHASE_ERROR)
++        {
++            Add(f, Newest(f)->index + count, time);
++            Fit(f, &fitted, &at_newest);
++            if (llabs((int64_t) fitted - timeline_period) * MAX_PERIOD_DEVIATION
++                    < timeline_period)
++            {
++                *vsync = time + (int64_t) at_newest;
++                *period = (int64_t)(fitted + .5);
++                return;
++            }
++        }
++    }
++
++    android_vsync_fit_Init(f);
++    Add(f, 0, time);
++}
+diff --git a/modules/video_output/android/vsync_fit.h b/modules/video_output/android/vsync_fit.h
+new file mode 100644
+index 0000000000..e04eddd4d3
+--- /dev/null
++++ b/modules/video_output/android/vsync_fit.h
+@@ -0,0 +1,48 @@
++/*****************************************************************************
++ * vsync_fit.h: fit the vsync timeline from sparse Choreographer samples
++ *****************************************************************************
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++#ifndef VLC_ANDROID_VSYNC_FIT_H
++#define VLC_ANDROID_VSYNC_FIT_H
++
++#include <stdint.h>
++
++#define ANDROID_VSYNC_FIT_SAMPLES 16
++
++struct android_vsync_sample
++{
++    int64_t index;
++    int64_t time;
++};
++
++struct android_vsync_fit
++{
++    struct android_vsync_sample samples[ANDROID_VSYNC_FIT_SAMPLES];
++    unsigned count;
++    unsigned newest;
++};
++
++void android_vsync_fit_Init(struct android_vsync_fit *);
++
++/* Folds in a vsync time and the spacing of the frame timelines it came with,
++ * both in nanoseconds, and gives back a vsync and period from the timeline
++ * fitted through the samples so far. */
++void android_vsync_fit_Sample(struct android_vsync_fit *, int64_t time,
++                              int64_t timeline_period,
++                              int64_t *vsync, int64_t *period);
++
++#endif
+diff --git a/modules/video_output/meson.build b/modules/video_output/meson.build
+index 381d01ecf0..6518634b59 100644
+--- a/modules/video_output/meson.build
++++ b/modules/video_output/meson.build
+@@ -94,7 +94,7 @@ if host_system == 'android'
+     )
+     vlc_modules += {
+         'name' : 'android_display',
+-        'sources' : [files('android/display.c', 'android/pacing.c', 'android/vsync.c'), android_gl_sources],
++        'sources' : [files('android/display.c', 'android/pacing.c', 'android/vsync.c', 'android/vsync_fit.c'), android_gl_sources],
+         'c_args' : ['-DUSE_OPENGL_ES2'],
+         'include_directories' : [vlc_include_dirs],
+         'link_with' : [libandroid_utils, libandroid_env],
+-- 
+2.56.0
+
