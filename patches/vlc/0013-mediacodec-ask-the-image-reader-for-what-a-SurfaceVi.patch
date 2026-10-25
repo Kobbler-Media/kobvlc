@@ -1,0 +1,116 @@
+From d861d9e9cc8b701321f0c3960a81c86cd349c178 Mon Sep 17 00:00:00 2001
+Message-Id: <d861d9e9cc8b701321f0c3960a81c86cd349c178.1792905594.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Sun, 25 Oct 2026 18:00:00 +1100
+Subject: [PATCH] mediacodec: ask the image reader for what a SurfaceView asks
+
+10-bit HEVC played solid green on a Chromecast with Google TV HD while
+8-bit HEVC and H.264 were clean, and the file decoded without an error in
+software.
+
+A codec2 decoder sees the consumer usage of the surface it is given and
+may choose its output from it. The images of the AImageReader VLC decodes
+into go straight to SurfaceFlinger through an ASurfaceControl, yet the
+reader asked for no usage at all. Amlogic's decoders take a consumer
+without GRALLOC_USAGE_HW_COMPOSER for a SurfaceTexture: they leave the
+compressed output and the gralloc attributes the composer reads unset,
+and for HEVC write the picture once at full size. The layer still goes to
+the video plane, and there an 8-bit picture shows but a 10-bit one is
+green.
+
+Ask for what a SurfaceView's queue asks of a decoder, the composer and the
+GPU (should SurfaceFlinger compose the layer itself), when the images are
+presented directly. When VLC's OpenGL display samples them, as for
+projections and rotations, the GPU usage alone stays.
+---
+ modules/codec/Makefile.am                 |  1 +
+ modules/codec/omxil/aimage_reader_usage.h | 38 +++++++++++++++++++++++
+ modules/codec/omxil/mediacodec.c          |  6 ++--
+ 3 files changed, 41 insertions(+), 4 deletions(-)
+ create mode 100644 modules/codec/omxil/aimage_reader_usage.h
+
+diff --git a/modules/codec/Makefile.am b/modules/codec/Makefile.am
+index 46fd1b42e0..08ba041ed6 100644
+--- a/modules/codec/Makefile.am
++++ b/modules/codec/Makefile.am
+@@ -495,6 +495,7 @@ libomxil_plugin_la_LDFLAGS = $(AM_LDFLAGS) $(codec_RPATH)
+ 
+ libmediacodec_plugin_la_CPPFLAGS = $(AM_CPPFLAGS) -I$(srcdir)/codec/omxil
+ libmediacodec_plugin_la_SOURCES = codec/omxil/mediacodec.c codec/omxil/mediacodec.h \
++	codec/omxil/aimage_reader_usage.h \
+ 	codec/omxil/mediacodec_jni.c codec/omxil/mediacodec_ndk.c codec/omxil/utils.c \
+ 	codec/omxil/omxil_utils.h codec/omxil/qcom.c codec/omxil/qcom.h
+ libmediacodec_plugin_la_LIBADD = libchroma_copy.la libvlc_hxxxhelper.la \
+diff --git a/modules/codec/omxil/aimage_reader_usage.h b/modules/codec/omxil/aimage_reader_usage.h
+new file mode 100644
+index 0000000000..0decd1a289
+--- /dev/null
++++ b/modules/codec/omxil/aimage_reader_usage.h
+@@ -0,0 +1,38 @@
++/*****************************************************************************
++ * aimage_reader_usage.h: usage of the AImageReader MediaCodec decodes into
++ *****************************************************************************
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++#ifndef VLC_MEDIACODEC_AIMAGE_READER_USAGE_H
++#define VLC_MEDIACODEC_AIMAGE_READER_USAGE_H
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <android/hardware_buffer.h>
++
++/* Without OpenGL in between, the images go straight to SurfaceFlinger, so ask
++ * for what a SurfaceView's queue asks: decoders choose their output for the
++ * consumer, and Amlogic's take one without the composer bit for a
++ * SurfaceTexture, whose 10-bit HEVC frames show green on the video plane. */
++static inline uint64_t AImageReaderUsage(bool need_gpu)
++{
++    uint64_t usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
++    if (!need_gpu)
++        usage |= AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY;
++    return usage;
++}
++
++#endif
+diff --git a/modules/codec/omxil/mediacodec.c b/modules/codec/omxil/mediacodec.c
+index 4b8023d1e2..b9a9a56715 100644
+--- a/modules/codec/omxil/mediacodec.c
++++ b/modules/codec/omxil/mediacodec.c
+@@ -41,6 +41,7 @@
+ #include <vlc_bits.h>
+ 
+ #include "mediacodec.h"
++#include "aimage_reader_usage.h"
+ #include "../codec/hxxx_helper.h"
+ #include <OMX_Core.h>
+ #include <OMX_Component.h>
+@@ -952,12 +953,9 @@ CreateSurfaceFromAImageReader(decoder_t *p_dec, vlc_decoder_device *dec_dev,
+ 
+     int32_t width = 1, height = 1; /* Ignored by MediaCodec */
+     int32_t format = AIMAGE_FORMAT_PRIVATE;
+-    uint64_t usage = 0;
++    uint64_t usage = AImageReaderUsage(need_gpu);
+     int32_t max_images = 32;
+ 
+-    if (need_gpu)
+-        usage |= AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
+-
+     AImageReader *reader;
+     int32_t status = air_api->AImageReader.newWithUsage(width, height, format,
+                                                         usage, max_images,
+-- 
+2.56.0
+
