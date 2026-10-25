@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${KOBVLC_WORK:-$ROOT/work}"
 VLC="$WORK/libvlcjni/vlc/modules"
 SRC="$VLC/video_output/android"
+AOUT="$VLC/audio_output/android"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 
@@ -17,3 +18,7 @@ cc -std=gnu11 -O2 -Wall -Wextra -Werror -I"$SRC" \
 cc -std=gnu11 -O2 -Wall -Wextra -Werror -I"$ROOT/android/test-include" -I"$VLC/codec/omxil" \
   "$ROOT/android/aimage-reader-usage-test.c" -o "$OUT/aimage-reader-usage-test"
 "$OUT/aimage-reader-usage-test"
+
+cc -std=gnu11 -O2 -Wall -Wextra -Werror -I"$AOUT" \
+  "$ROOT/android/fade-test.c" "$AOUT/fade.c" -lm -o "$OUT/fade-test"
+"$OUT/fade-test"

@@ -1,0 +1,223 @@
+From 03605b7cb25c2a9040cde3424433050690986fd8 Mon Sep 17 00:00:00 2001
+Message-Id: <03605b7cb25c2a9040cde3424433050690986fd8.1792921175.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Sun, 25 Oct 2026 20:39:22 +1100
+Subject: [PATCH] aout: aaudio: fade in each new stream
+
+A flush opens a new stream, and AudioFlinger gives a new track no ramp on
+its first volume setting, as it does for a pause or a resume. Each one
+started at full level partway through a waveform and clicked: every
+seek, and every "way too late" or discontinuity flush after a stall. A
+Pixel 10 clicked on skipping an intro.
+
+Ramp the first 10ms of audio in, and the audio coming back after an
+underrun as well. The way out needs nothing: the pause before the flush
+is ramped down by AudioFlinger.
+---
+ modules/audio_output/Makefile.am      |  3 +-
+ modules/audio_output/android/aaudio.c | 21 ++++++++++
+ modules/audio_output/android/fade.c   | 55 +++++++++++++++++++++++++++
+ modules/audio_output/android/fade.h   | 37 ++++++++++++++++++
+ 4 files changed, 115 insertions(+), 1 deletion(-)
+ create mode 100644 modules/audio_output/android/fade.c
+ create mode 100644 modules/audio_output/android/fade.h
+
+diff --git a/modules/audio_output/Makefile.am b/modules/audio_output/Makefile.am
+index 291c4092ff..f94921d3bd 100644
+--- a/modules/audio_output/Makefile.am
++++ b/modules/audio_output/Makefile.am
+@@ -38,7 +38,8 @@ libandroid_audiotrack_plugin_la_LIBADD = libandroid_env.la \
+ 	libvlc_android_audioformat_jni.la \
+ 	libvlc_android_dynamicsprocessing_jni.la
+ 
+-libandroid_aaudio_plugin_la_SOURCES = audio_output/android/aaudio.c audio_output/android/device.h
++libandroid_aaudio_plugin_la_SOURCES = audio_output/android/aaudio.c audio_output/android/device.h \
++	audio_output/android/fade.c audio_output/android/fade.h
+ libandroid_aaudio_plugin_la_LIBADD = libandroid_env.la libvlc_android_dynamicsprocessing_jni.la $(LIBDL)
+ 
+ libandroid_audiodevice_plugin_la_SOURCES = audio_output/android/device.c audio_output/android/device.h
+diff --git a/modules/audio_output/android/aaudio.c b/modules/audio_output/android/aaudio.c
+index 45dbcfa06d..2e1bdb1600 100644
+--- a/modules/audio_output/android/aaudio.c
++++ b/modules/audio_output/android/aaudio.c
+@@ -33,10 +33,12 @@
+ 
+ #include "device.h"
+ #include "dynamicsprocessing_jni.h"
++#include "fade.h"
+ 
+ #include <aaudio/AAudio.h>
+ 
+ #define TIMING_REPORT_DELAY_TICKS VLC_TICK_FROM_MS(1000)
++#define FADE_IN_TICKS VLC_TICK_FROM_MS(10)
+ 
+ struct sys
+ {
+@@ -84,6 +86,8 @@ struct sys
+     size_t timing_report_delay_bytes;
+     vlc_tick_t first_pts;
+ 
++    struct android_fade fade;
++
+     /* Channel reordering */
+     uint8_t chans_to_reorder;
+     uint8_t chan_table[AOUT_CHAN_MAX];
+@@ -349,6 +353,15 @@ TicksToBytes(struct sys *sys, vlc_tick_t ticks)
+     return FramesToBytes(sys, TicksToFrames(sys, ticks));
+ }
+ 
++/* AudioFlinger ramps a track down when it pauses, but a new track gets no
++ * ramp on its first volume setting: each stream opened by a flush started at
++ * full level partway through a waveform, and clicked. */
++static void
++FadeIn(struct sys *sys)
++{
++    android_fade_In(&sys->fade, TicksToFrames(sys, FADE_IN_TICKS));
++}
++
+ static int
+ GetFrameTimestampLocked(aout_stream_t *stream, int64_t *pos_frames,
+                         vlc_tick_t *frame_time_us)
+@@ -433,6 +446,9 @@ DataCallback(AAudioStream *as, void *user, void *data_, int32_t num_frames)
+             else
+                 res = AAUDIO_CALLBACK_RESULT_STOP;
+ 
++            if (sys->started)
++                FadeIn(sys);
++
+             vlc_mutex_unlock(&sys->lock);
+ 
+             memset(data, 0, bytes);
+@@ -479,6 +495,9 @@ DataCallback(AAudioStream *as, void *user, void *data_, int32_t num_frames)
+         }
+ 
+         memcpy(data, f->p_buffer, tocopy);
++        android_fade_Apply(&sys->fade, data, BytesToFrames(sys, tocopy),
++                           sys->fmt.i_channels,
++                           sys->cfg.format == AAUDIO_FORMAT_PCM_FLOAT);
+ 
+         data += tocopy;
+         bytes -= tocopy;
+@@ -811,6 +830,7 @@ error:
+     sys->timing_report_delay_bytes = 0;
+     sys->underrun_warn_bytes = 0;
+     sys->underrun_total_bytes = 0;
++    FadeIn(sys);
+ 
+     int ret = OpenAAudioStream(stream);
+     if (ret != VLC_SUCCESS)
+@@ -942,6 +962,7 @@ Start(aout_stream_t *stream, audio_sample_format_t *fmt,
+     /* Use the native sample rate of the device */
+     sys->fmt.i_rate = fmt->i_rate = vt.AAudioStream_getSampleRate(sys->as);
+     assert(fmt->i_rate > 0);
++    FadeIn(sys);
+ 
+     sys->cfg.session_id = vt.AAudioStream_getSessionId(sys->as);
+ 
+diff --git a/modules/audio_output/android/fade.c b/modules/audio_output/android/fade.c
+new file mode 100644
+index 0000000000..3589a3c332
+--- /dev/null
++++ b/modules/audio_output/android/fade.c
+@@ -0,0 +1,55 @@
++/*****************************************************************************
++ * fade.c: fade-in for Android audio outputs
++ *****************************************************************************
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++#ifdef HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#include <stddef.h>
++
++#include "fade.h"
++
++void android_fade_In(struct android_fade *f, uint32_t frames)
++{
++    f->gain = 0.f;
++    f->step = frames > 0 ? 1.f / frames : 1.f;
++}
++
++void android_fade_Apply(struct android_fade *f, void *samples, uint32_t frames,
++                        unsigned channels, bool fl32)
++{
++    for (uint32_t i = 0; i < frames && f->gain < 1.f; i++)
++    {
++        f->gain += f->step;
++        if (f->gain > 1.f)
++            f->gain = 1.f;
++
++        if (fl32)
++        {
++            float *frame = (float *)samples + (size_t)i * channels;
++            for (unsigned c = 0; c < channels; c++)
++                frame[c] *= f->gain;
++        }
++        else
++        {
++            int16_t *frame = (int16_t *)samples + (size_t)i * channels;
++            for (unsigned c = 0; c < channels; c++)
++                frame[c] = (int16_t)(frame[c] * f->gain);
++        }
++    }
++}
+diff --git a/modules/audio_output/android/fade.h b/modules/audio_output/android/fade.h
+new file mode 100644
+index 0000000000..ba5150dc9f
+--- /dev/null
++++ b/modules/audio_output/android/fade.h
+@@ -0,0 +1,37 @@
++/*****************************************************************************
++ * fade.h: fade-in for Android audio outputs
++ *****************************************************************************
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++#ifndef VLC_ANDROID_FADE_H
++#define VLC_ANDROID_FADE_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++struct android_fade
++{
++    float gain;
++    float step;
++};
++
++void android_fade_In(struct android_fade *, uint32_t frames);
++
++/* Interleaved FL32 or S16N samples, each frame at the gain the ramp reached. */
++void android_fade_Apply(struct android_fade *, void *samples, uint32_t frames,
++                        unsigned channels, bool fl32);
++
++#endif
+-- 
+2.56.0
+

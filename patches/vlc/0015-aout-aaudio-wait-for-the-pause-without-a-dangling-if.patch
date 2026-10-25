@@ -1,0 +1,44 @@
+From 01038c0e834b3389fe6db86aa1cf39b48b45cbf4 Mon Sep 17 00:00:00 2001
+Message-Id: <01038c0e834b3389fe6db86aa1cf39b48b45cbf4.1792921175.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Sun, 25 Oct 2026 20:27:05 +1100
+Subject: [PATCH] aout: aaudio: wait for the pause without a dangling if
+
+The wait for the paused state had lost its statement, so the next line,
+sys->started = false, ran only when that wait failed: after an error the
+next flush resets it anyway, so it never had an effect. Resetting it on
+every pause would be wrong: a resumed stream picks up where it stopped,
+as AudioTrack's does, and the core moves its timing by the pause.
+---
+ modules/audio_output/android/aaudio.c | 8 ++------
+ 1 file changed, 2 insertions(+), 6 deletions(-)
+
+diff --git a/modules/audio_output/android/aaudio.c b/modules/audio_output/android/aaudio.c
+index 2e1bdb1600..d64cab0db9 100644
+--- a/modules/audio_output/android/aaudio.c
++++ b/modules/audio_output/android/aaudio.c
+@@ -758,7 +758,6 @@ bailout:
+ static void
+ Pause(aout_stream_t *stream, bool pause, vlc_tick_t pause_date)
+ {
+-    struct sys *sys = stream->sys;
+     (void) pause_date;
+ 
+     aaudio_stream_state_t state = GetState(stream);
+@@ -771,11 +770,8 @@ Pause(aout_stream_t *stream, bool pause, vlc_tick_t pause_date)
+          || state == AAUDIO_STREAM_STATE_STARTED)
+             RequestPause(stream);
+ 
+-        state = GetState(stream);
+-        if (state == AAUDIO_STREAM_STATE_PAUSING
+-         && WaitState(stream, AAUDIO_STREAM_STATE_PAUSED) != VLC_SUCCESS)
+-
+-        sys->started = false;
++        if (GetState(stream) == AAUDIO_STREAM_STATE_PAUSING)
++            WaitState(stream, AAUDIO_STREAM_STATE_PAUSED);
+     }
+     else
+     {
+-- 
+2.56.0
+
