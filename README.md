@@ -43,6 +43,7 @@ Everything VideoLAN publishes stays theirs. This repo only holds what differs.
 |---|---|
 | MediaPlayer: select the video track again when the surface returns | A paused video came back black after backgrounding. |
 | buildsystem: allow extra modules to be left out | Hooks `modules-blacklist` into the build. |
+| AWindow: keep the window size when a vout unregisters | The size belongs to the surface, which outlives the vout. Forgotten on unregister, a vout that registered next had nothing to replay and placed the picture at its source size from the top-left corner: a 640x360 episode after a 1080p one played as a small picture in the corner of a green screen. |
 
 `modules-blacklist` — encoders, stream output, discs, network shares, scripting and the
 like, left out of both builds. See the file for the list and the reasoning.
