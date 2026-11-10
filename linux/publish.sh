@@ -12,7 +12,8 @@ ARCHIVE="$WORK/linux/libvlc-linux-x64-$DESKTOP_VERSION.tar.gz"
 [ -f "$ARCHIVE" ] || { echo "nothing built for $DESKTOP_VERSION; run linux/build.sh first" >&2; exit 1; }
 
 TAG="linux-v$DESKTOP_VERSION"
-export GH_TOKEN="${GH_TOKEN:-$(gh auth token -u kobbler-dev)}"
+[ -f "$ROOT/local.env" ] && source "$ROOT/local.env"
+export GH_TOKEN="${GH_TOKEN:-$(gh auth token ${KOBVLC_GH_USER:+-u "$KOBVLC_GH_USER"})}"
 gh release view "$TAG" -R Kobbler-Media/kobvlc >/dev/null 2>&1 ||
   gh release create "$TAG" -R Kobbler-Media/kobvlc --title "$TAG" --notes "dev.kobbler.vlc:libvlc-linux-x64:$DESKTOP_VERSION"
 gh release upload "$TAG" -R Kobbler-Media/kobvlc --clobber "$ARCHIVE"

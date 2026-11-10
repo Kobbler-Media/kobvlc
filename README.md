@@ -51,7 +51,8 @@ like, left out of both builds. See the file for the list and the reasoning.
 ## Building
 
 Needs Docker; Android also needs a JDK 21 (`KOBVLC_JAVA_HOME`, default
-`/usr/lib/jvm/java-21-openjdk`) and an Android SDK (`ANDROID_HOME`).
+`/usr/lib/jvm/java-21-openjdk` as Arch installs it; Debian/Ubuntu:
+`/usr/lib/jvm/java-21-openjdk-amd64`) and an Android SDK (`ANDROID_HOME`).
 
 ```bash
 android/build.sh             # every ABI, into work/maven
@@ -62,8 +63,8 @@ android/test.sh              # host tests of the Android patches, on the tree a 
 
 The first build clones the sources into `work/` (and, for Android, downloads the
 contribs); later builds reset the trees to the pins, reapply the patches and rebuild only
-what changed. kobapp runs its desktop build against a local Linux build with
-`-Pkobvlc.linux=<this repo>/work/linux/pkg`.
+what changed. kobapp builds against local output with `-Pkobvlc.linux=<this repo>/work/linux/pkg`
+(desktop) and `-Pkobvlc.maven=<this repo>/work/maven` (Android).
 
 ## Publishing
 
@@ -76,10 +77,10 @@ linux/build.sh && linux/publish.sh
 ```
 
 `android/publish.sh` attaches the AAR and an Ivy descriptor to a GitHub release
-`v<VERSION>`, and copies the version to the LAN Maven host, which keeps only the newest two.
-`linux/publish.sh` attaches the tarball to `linux-v<DESKTOP_VERSION>`. kobapp resolves both
-from the releases — anywhere, CI included. The host serves `maven/data` with
-`maven/compose.yml` (`docker compose up -d` from `maven/`).
+`v<VERSION>`; `linux/publish.sh` attaches the tarball to `linux-v<DESKTOP_VERSION>`. kobapp
+resolves both from the releases — anywhere, CI included. Both scripts authenticate with
+`GH_TOKEN`, falling back to `gh auth token` — for the account named by `KOBVLC_GH_USER` when
+that's set, e.g. in an untracked `local.env` at the repo root.
 
 ## Following VideoLAN
 
