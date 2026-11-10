@@ -111,4 +111,5 @@ Work in `work/libvlcjni/vlc` (or `work/vlc-linux`), commit, then export with
 ## Licence
 
 LibVLC is LGPL-2.1-or-later, and several of its modules are GPL. The patches here are
-under the same terms as the files they change.
+under the same terms as the files they change; everything else in this repository is under
+the LGPL-2.1 in [LICENSE](LICENSE), as libvlcjni is.
