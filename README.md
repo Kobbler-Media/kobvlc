@@ -3,7 +3,7 @@
 LibVLC as kobbler's apps ship it, with a short series of patches on top and the modules
 playback never touches left out:
 
-Both are built from one VLC, `VLC_COMMIT` in `versions.env`, with one patch series:
+All are built from one VLC, `VLC_COMMIT` in `versions.env`, with one patch series:
 
 - **Android** — VideoLAN's [libvlcjni](https://code.videolan.org/videolan/libvlcjni) pinned
   to a known commit, built in their CI image against their prebuilt contribs. kobapp
@@ -13,6 +13,11 @@ Both are built from one VLC, `VLC_COMMIT` in `versions.env`, with one patch seri
 - **Linux desktop** — VLC itself, built in an Arch container against Arch's own libraries,
   as a relocatable tree kobapp unpacks into its resources
   (`dev.kobbler.vlc:libvlc-linux-x64:<VERSION>`). It runs on Arch and its derivatives.
+- **iOS** — VLC itself, built by its own `extras/package/apple/build.sh` for arm64 devices
+  (against VideoLAN's prebuilt contribs) and the arm64 simulator (contribs from source), as a
+  static `libvlc.xcframework` kobapp links through the libvlc C API
+  (`dev.kobbler.vlc:libvlc-ios:<VERSION>`). The archive carries the SDK frameworks and
+  libraries it needs as linker options, so whatever links it needs no flags of its own.
 
 Everything VideoLAN publishes stays theirs. This repo only holds what differs.
 
@@ -51,11 +56,13 @@ Everything VideoLAN publishes stays theirs. This repo only holds what differs.
 | MediaPlayer: add resume() | `play()` only resumes a player that already reads as paused, so a pause still on its way (a preload held as it opened) landed after it and the title stayed paused. `resume()` queues behind the pause, as `libvlc_media_player_set_pause(mp, 0)`. |
 
 `modules-blacklist` — encoders, stream output, discs, network shares, scripting and the
-like, left out of both builds. See the file for the list and the reasoning.
+like, left out of every build. See the file for the list and the reasoning.
 
 ## Building
 
-Needs Docker; Android also needs a JDK 21 (`KOBVLC_JAVA_HOME`, default
+Needs Docker (iOS: a Mac with Xcode instead, a Python 3.10+ for VLC's meson and a GNU make
+4.3+, as `KOBVLC_PYTHON` and `KOBVLC_MAKE` when the first `python3` and `make` on the
+`PATH` are macOS's own); Android also needs a JDK 21 (`KOBVLC_JAVA_HOME`, default
 `/usr/lib/jvm/java-21-openjdk` as Arch installs it; Debian/Ubuntu:
 `/usr/lib/jvm/java-21-openjdk-amd64`) and an Android SDK (`ANDROID_HOME`).
 
@@ -63,13 +70,15 @@ Needs Docker; Android also needs a JDK 21 (`KOBVLC_JAVA_HOME`, default
 android/build.sh             # every ABI, into work/maven
 android/build.sh arm64 arm   # just these, for trying a change on a device
 linux/build.sh               # work/linux/libvlc-linux-x64-<VERSION>.tar.gz
+ios/build.sh                 # work/ios/libvlc-ios-<VERSION>.tar.gz, on a Mac
 android/test.sh              # host tests of the Android patches, on the tree a build patched
 ```
 
 The first build clones the sources into `work/` (and, for Android, downloads VideoLAN's
 prebuilt contribs for `VLC_COMMIT`); later builds reset the trees to the pins, reapply the
 patches and rebuild only what changed. kobapp builds against local output with `-Pkobvlc.linux=<this repo>/work/linux/pkg`
-(desktop) and `-Pkobvlc.maven=<this repo>/work/maven` (Android).
+(desktop), `-Pkobvlc.maven=<this repo>/work/maven` (Android) and
+`-Pkobvlc.ios=<this repo>/work/ios/libvlc.xcframework` (iOS).
 
 ## Publishing
 
@@ -79,11 +88,13 @@ for a new VLC, `-kob2` for our own change on the same one), then:
 ```bash
 android/build.sh && android/publish.sh
 linux/build.sh && linux/publish.sh
+ios/build.sh && ios/publish.sh
 ```
 
 `android/publish.sh` attaches the AAR and an Ivy descriptor to a GitHub release
-`v<VERSION>`; `linux/publish.sh` attaches the tarball to `linux-v<VERSION>`. kobapp
-resolves both from the releases — anywhere, CI included. Both scripts authenticate with
+`v<VERSION>`; `linux/publish.sh` attaches the tarball to `linux-v<VERSION>`, `ios/publish.sh` the
+xcframework to `ios-v<VERSION>`. kobapp
+resolves all three from the releases — anywhere, CI included. The scripts authenticate with
 `GH_TOKEN`, falling back to `gh auth token` — for the account named by `KOBVLC_GH_USER` when
 that's set, e.g. in an untracked `local.env` at the repo root.
 
