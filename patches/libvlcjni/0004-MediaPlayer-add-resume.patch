@@ -1,0 +1,59 @@
+From 67fb6385be9d063242f5c75cf5de744bd4fca0db Mon Sep 17 00:00:00 2001
+Message-Id: <67fb6385be9d063242f5c75cf5de744bd4fca0db.1794367587.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Wed, 11 Nov 2026 14:26:27 +1100
+Subject: [PATCH] MediaPlayer: add resume()
+
+play() only resumes a player that already reads as paused. A pause
+given just before, still on its way to the input, was left to land
+after it, and the player stayed paused with nothing to resume it.
+resume() asks libvlc to resume, which queues behind the pause.
+---
+ libvlc/jni/libvlcjni-mediaplayer.c                    | 11 +++++++++++
+ .../main/java/org/videolan/libvlc/MediaPlayer.java    |  8 ++++++++
+ 2 files changed, 19 insertions(+)
+
+diff --git a/libvlc/jni/libvlcjni-mediaplayer.c b/libvlc/jni/libvlcjni-mediaplayer.c
+index 1797e19..fcd0ec2 100644
+--- a/libvlc/jni/libvlcjni-mediaplayer.c
++++ b/libvlc/jni/libvlcjni-mediaplayer.c
+@@ -385,6 +385,17 @@ Java_org_videolan_libvlc_MediaPlayer_pause(JNIEnv *env, jobject thiz)
+     libvlc_media_player_set_pause(p_obj->u.p_mp, 1);
+ }
+ 
++void
++Java_org_videolan_libvlc_MediaPlayer_resume(JNIEnv *env, jobject thiz)
++{
++    vlcjni_object *p_obj = VLCJniObject_getInstance(env, thiz);
++
++    if (!p_obj)
++        return;
++
++    libvlc_media_player_set_pause(p_obj->u.p_mp, 0);
++}
++
+ jint
+ Java_org_videolan_libvlc_MediaPlayer_getPlayerState(JNIEnv *env, jobject thiz)
+ {
+diff --git a/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java b/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java
+index 54a0508..d66f2e2 100644
+--- a/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java
++++ b/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java
+@@ -1313,6 +1313,14 @@ public class MediaPlayer extends VLCObject<MediaPlayer.Event> {
+      */
+     public native void pause();
+ 
++    /**
++     * Resumes paused media, or media whose pause is still on its way.
++     *
++     * Unlike {@link #play()}, which leaves a player that does not read as paused yet alone,
++     * this cancels a pause given just before.
++     */
++    public native void resume();
++
+     /**
+      * Get player state.
+      */
+-- 
+2.56.0
+

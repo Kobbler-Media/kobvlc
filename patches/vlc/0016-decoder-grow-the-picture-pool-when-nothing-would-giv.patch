@@ -1,0 +1,372 @@
+From 042ca8b25f947ca64874bd1a97b85319c40d16e4 Mon Sep 17 00:00:00 2001
+Message-Id: <042ca8b25f947ca64874bd1a97b85319c40d16e4.1794365397.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Wed, 11 Nov 2026 12:40:30 +1100
+Subject: [PATCH] decoder: grow the picture pool when nothing would give one
+ back
+
+A frame-threaded decoder can hold every picture of its pool. After a
+seek into a stream it cannot decode cleanly, each of libavcodec's HEVC
+threads makes up the references the seek left it without, and with ten
+threads that is more than the 18 + 2 * threads + 2 the pool was sized
+for. The thread asking for one more waited on the pool forever: nothing
+was queued to the video output, which keeps the picture on screen until
+the next one comes. The decoder thread waited on that thread inside
+avcodec_send_packet, so it never reached the flush that would have
+released them, and the input waited on the first picture in
+EsOutDecodersStopBuffering. Stopping the player waited on the input,
+for good. The made-up references stay held until the decoder has
+decoded well past them, so this can happen again just after the first
+picture as well.
+
+The pool now grows by a picture when it is empty and nothing is queued
+to the video output, or while the decoder is flushed or deleted. Grown
+pictures stay in the pool, so they come back to it like any other. When
+the output still has pictures to show, the pool keeps throttling the
+decoder against it as before.
+---
+ include/vlc_picture_pool.h                    |  23 ++++
+ src/input/decoder.c                           |  21 +++-
+ src/libvlccore.sym                            |   2 +
+ src/misc/picture_pool.c                       |  54 +++++++++
+ src/test/picture_pool.c                       |  11 ++
+ .../input/decoder/input_decoder_scenarios.c   | 113 ++++++++++++++++++
+ 6 files changed, 223 insertions(+), 1 deletion(-)
+
+diff --git a/include/vlc_picture_pool.h b/include/vlc_picture_pool.h
+index efa2a5f1eb..02aa8bde5c 100644
+--- a/include/vlc_picture_pool.h
++++ b/include/vlc_picture_pool.h
+@@ -104,4 +104,27 @@ VLC_API picture_t * picture_pool_Get( picture_pool_t * ) VLC_USED;
+  */
+ VLC_API picture_t *picture_pool_Wait(picture_pool_t *) VLC_USED;
+ 
++/**
++ * Obtains a picture from a pool, waiting no later than a deadline.
++ *
++ * The picture must be released with picture_Release().
++ *
++ * @return a picture, or NULL if none was available by the deadline
++ *
++ * @note This function is thread-safe.
++ */
++VLC_API picture_t *picture_pool_WaitUntil(picture_pool_t *, vlc_tick_t deadline) VLC_USED;
++
++/**
++ * Adds a picture to a pool created by picture_pool_NewFromFormat().
++ *
++ * For a pool whose pictures are all held by a user that will not give one
++ * back before it gets another.
++ *
++ * @return VLC_SUCCESS, or VLC_ENOMEM if the pool is full or out of memory
++ *
++ * @note This function is thread-safe.
++ */
++VLC_API int picture_pool_Grow(picture_pool_t *);
++
+ #endif /* VLC_PICTURE_POOL_H */
+diff --git a/src/input/decoder.c b/src/input/decoder.c
+index 0988eb624d..3c9bdf3300 100644
+--- a/src/input/decoder.c
++++ b/src/input/decoder.c
+@@ -996,7 +996,26 @@ static picture_t *ModuleThread_NewVideoBuffer( decoder_t *p_dec )
+     assert( p_owner->video.vout );
+     assert( p_owner->video.out_pool );
+ 
+-    picture_t *pic = picture_pool_Wait( p_owner->video.out_pool );
++    picture_pool_t *pool = p_owner->video.out_pool;
++    picture_t *pic;
++    /* A frame-threaded decoder can hold every picture of the pool: after a
++     * seek, each libavcodec HEVC thread makes up the references it lacks.
++     * With nothing queued to the video output, which keeps the one on screen
++     * until the next, and while flushed or deleted, no picture will come back
++     * before the decoder gets another. */
++    while ((pic = picture_pool_Get(pool)) == NULL)
++    {
++        vlc_fifo_Lock(p_owner->p_fifo);
++        bool stuck = p_owner->flushing || p_owner->aborting
++                  || vout_IsEmpty(p_owner->video.vout);
++        vlc_fifo_Unlock(p_owner->p_fifo);
++        if (stuck && picture_pool_Grow(pool) == VLC_SUCCESS)
++            continue;
++
++        pic = picture_pool_WaitUntil(pool, vlc_tick_now() + VLC_TICK_FROM_MS(20));
++        if (pic != NULL)
++            break;
++    }
+ 
+     if (pic)
+     {
+diff --git a/src/libvlccore.sym b/src/libvlccore.sym
+index 12f282a0ce..3b0f84dac0 100644
+--- a/src/libvlccore.sym
++++ b/src/libvlccore.sym
+@@ -348,6 +348,8 @@ picture_pool_Get
+ picture_pool_New
+ picture_pool_NewFromFormat
+ picture_pool_Wait
++picture_pool_WaitUntil
++picture_pool_Grow
+ picture_Reset
+ picture_Setup
+ plane_CopyPixels
+diff --git a/src/misc/picture_pool.c b/src/misc/picture_pool.c
+index 43469450e4..aab736b834 100644
+--- a/src/misc/picture_pool.c
++++ b/src/misc/picture_pool.c
+@@ -46,6 +46,9 @@ struct picture_pool_t {
+ 
+     vlc_atomic_rc_t    refs;
+     bool released;
++    unsigned count;
++    bool has_format;
++    video_format_t format;
+     struct vlc_list inuse_list;
+     struct vlc_list available_list;
+ };
+@@ -58,6 +61,8 @@ static void picture_pool_Destroy(picture_pool_t *pool)
+     assert(vlc_list_is_empty(&pool->inuse_list));
+     assert(vlc_list_is_empty(&pool->available_list));
+ 
++    if (pool->has_format)
++        video_format_Clean(&pool->format);
+     free(pool);
+ }
+ 
+@@ -129,6 +134,7 @@ static void picture_pool_AppendPic(picture_pool_t *pool, picture_t *pic)
+     assert(priv->pool == NULL);
+     vlc_list_append(&priv->pool_node, &pool->available_list);
+     priv->pool = pool;
++    pool->count++;
+ }
+ 
+ static picture_pool_t *
+@@ -146,6 +152,8 @@ picture_pool_NewCommon(void)
+     vlc_cond_init(&pool->wait);
+     vlc_atomic_rc_init(&pool->refs);
+     pool->released = false;
++    pool->count = 0;
++    pool->has_format = false;
+ 
+     return pool;
+ }
+@@ -176,6 +184,13 @@ picture_pool_t *picture_pool_NewFromFormat(const video_format_t *fmt,
+     if (unlikely(pool == NULL))
+         return NULL;
+ 
++    if (video_format_Copy(&pool->format, fmt) != VLC_SUCCESS)
++    {
++        picture_pool_Release(pool);
++        return NULL;
++    }
++    pool->has_format = true;
++
+     for (unsigned i = 0; i < count; ++i)
+     {
+         picture_t *pic = picture_NewFromFormat(fmt);
+@@ -238,3 +253,42 @@ picture_t *picture_pool_Wait(picture_pool_t *pool)
+ 
+     return picture_pool_ClonePicture(pool, pic);
+ }
++
++picture_t *picture_pool_WaitUntil(picture_pool_t *pool, vlc_tick_t deadline)
++{
++    vlc_mutex_lock(&pool->lock);
++    assert(vlc_atomic_rc_get(&pool->refs) > 0);
++
++    while (vlc_list_is_empty(&pool->available_list))
++        if (vlc_cond_timedwait(&pool->wait, &pool->lock, deadline))
++        {
++            vlc_mutex_unlock(&pool->lock);
++            return NULL;
++        }
++
++    picture_t *pic = picture_pool_GetAvailableLocked(pool);
++
++    vlc_mutex_unlock(&pool->lock);
++
++    return picture_pool_ClonePicture(pool, pic);
++}
++
++int picture_pool_Grow(picture_pool_t *pool)
++{
++    assert(pool->has_format);
++
++    vlc_mutex_lock(&pool->lock);
++    int ret = VLC_ENOMEM;
++    if (pool->count < POOL_MAX)
++    {
++        picture_t *pic = picture_NewFromFormat(&pool->format);
++        if (pic != NULL)
++        {
++            picture_pool_AppendPic(pool, pic);
++            vlc_cond_signal(&pool->wait);
++            ret = VLC_SUCCESS;
++        }
++    }
++    vlc_mutex_unlock(&pool->lock);
++    return ret;
++}
+diff --git a/src/test/picture_pool.c b/src/test/picture_pool.c
+index f2a0aab20a..09690eacb4 100644
+--- a/src/test/picture_pool.c
++++ b/src/test/picture_pool.c
+@@ -28,6 +28,7 @@
+ 
+ #include <vlc_common.h>
+ #include <vlc_es.h>
++#include <vlc_threads.h>
+ #include <vlc_picture_pool.h>
+ 
+ #define PICTURES 10
+@@ -76,6 +77,16 @@ static void test(bool zombie)
+         assert(pics[i] != NULL);
+     }
+ 
++    assert(picture_pool_WaitUntil(pool, vlc_tick_now() + VLC_TICK_FROM_MS(10)) == NULL);
++    assert(picture_pool_Grow(pool) == VLC_SUCCESS);
++    picture_t *grown = picture_pool_WaitUntil(pool, vlc_tick_now() + VLC_TICK_FROM_MS(10));
++    assert(grown != NULL);
++    void *grown_plane = grown->p[0].p_pixels;
++    picture_Release(grown);
++    grown = picture_pool_Get(pool);
++    assert(grown != NULL && grown->p[0].p_pixels == grown_plane);
++    picture_Release(grown);
++
+     if (!zombie)
+         for (unsigned i = 0; i < PICTURES; i++)
+             picture_Release(pics[i]);
+diff --git a/test/src/input/decoder/input_decoder_scenarios.c b/test/src/input/decoder/input_decoder_scenarios.c
+index 8a0169076a..5e239c136d 100644
+--- a/test/src/input/decoder/input_decoder_scenarios.c
++++ b/test/src/input/decoder/input_decoder_scenarios.c
+@@ -611,6 +611,90 @@ static const vlc_fourcc_t subpicture_chromas[] = {
+     VLC_CODEC_RGBA, 0
+ };
+ 
++/* More pictures than any decoder pool holds, as a frame-threaded decoder
++ * keeps when every thread synthesizes the references a seek left it without. */
++#define HOARD_SIZE 64
++static picture_t *hoard[HOARD_SIZE];
++
++static void hoard_pictures(decoder_t *dec)
++{
++    for (size_t i = 0; i < HOARD_SIZE; i++)
++    {
++        hoard[i] = decoder_NewPicture(dec);
++        assert(hoard[i] != NULL);
++    }
++}
++
++static void release_hoard(void)
++{
++    for (size_t i = 0; i < HOARD_SIZE; i++)
++        picture_Release(hoard[i]);
++}
++
++static void queue_new_picture(decoder_t *dec, vlc_tick_t date)
++{
++    picture_t *out = decoder_NewPicture(dec);
++    assert(out != NULL);
++    out->date = date;
++    out->b_force = true;
++    out->b_progressive = true;
++    decoder_QueueVideo(dec, out);
++}
++
++static int decoder_decode_hoard_before_output(decoder_t *dec, picture_t *pic)
++{
++    picture_Release(pic);
++    if (scenario_data.decoder_image_sent++ > 0)
++        return VLC_SUCCESS;
++
++    msg_Info(dec, "Hold every picture before the first output");
++    hoard_pictures(dec);
++    queue_new_picture(dec, VLC_TICK_0);
++    release_hoard();
++    vlc_sem_post(&scenario_data.wait_stop);
++    return VLC_SUCCESS;
++}
++
++static int decoder_decode_hoard_past_output(decoder_t *dec, picture_t *pic)
++{
++    picture_Release(pic);
++    if (scenario_data.decoder_image_sent++ > 0)
++        return VLC_SUCCESS;
++
++    msg_Info(dec, "Hold every picture until well after the first output");
++    hoard_pictures(dec);
++    for (int i = 0; i < 8; i++)
++        queue_new_picture(dec, VLC_TICK_0 + VLC_TICK_FROM_MS(40) * i);
++
++    release_hoard();
++    vlc_sem_post(&scenario_data.wait_stop);
++    return VLC_SUCCESS;
++}
++
++static int decoder_decode_hoard_on_flush(decoder_t *dec, picture_t *pic)
++{
++    if (scenario_data.skip_decoder)
++    {
++        picture_Release(pic);
++        return VLC_SUCCESS;
++    }
++
++    if (scenario_data.decoder_image_sent < 3)
++    {
++        decoder_QueueVideo(dec, pic);
++        scenario_data.decoder_image_sent++;
++        return VLC_SUCCESS;
++    }
++    picture_Release(pic);
++    scenario_data.skip_decoder = true;
++
++    msg_Info(dec, "Hold every picture while a seek flushes the decoder");
++    vlc_sem_post(&scenario_data.wait_ready_to_flush);
++    hoard_pictures(dec);
++    release_hoard();
++    return VLC_SUCCESS;
++}
++
+ #define source_800_600 "mock://video_track_count=1;length=100000000000;video_width=800;video_height=600"
+ struct input_decoder_scenario input_decoder_scenarios[] =
+ {{
+@@ -630,6 +714,35 @@ struct input_decoder_scenario input_decoder_scenarios[] =
+     .display_prepare = display_prepare_signal,
+     .interface_setup = interface_setup_check_flush,
+ },
++{
++    /* Nothing downstream releases pictures before the decoder's first
++     * output: waiting on its pool there never returns, and the input waits
++     * for that output forever. */
++    .name = "a decoder holding every picture still gets one for its first output",
++    .source = source_800_600,
++    .decoder_setup = decoder_i420_800_600_update,
++    .decoder_decode = decoder_decode_hoard_before_output,
++    .display_prepare = display_prepare_noop,
++},
++{
++    /* References a seek left a frame-threaded decoder without pin its
++     * pictures until it has decoded well past them: the video output, holding
++     * the one on screen, has none to give back. */
++    .name = "a decoder holding every picture past its first output still decodes",
++    .source = source_800_600,
++    .decoder_setup = decoder_i420_800_600_update,
++    .decoder_decode = decoder_decode_hoard_past_output,
++    .display_prepare = display_prepare_noop,
++},
++{
++    .name = "a decoder holding every picture when it is flushed still reaches its flush",
++    .source = source_800_600,
++    .decoder_setup = decoder_i420_800_600_update,
++    .decoder_decode = decoder_decode_hoard_on_flush,
++    .decoder_flush = decoder_flush_signal,
++    .display_prepare = display_prepare_noop,
++    .interface_setup = interface_setup_check_flush,
++},
+ {
+     /* Check that stream output is also flushed:
+       - the test cannot work if the stream_out filter is not added
+-- 
+2.56.0
+

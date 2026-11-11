@@ -1,0 +1,88 @@
+From 0fe1c5853e3ab7fd392e16c74930615efae89a2f Mon Sep 17 00:00:00 2001
+Message-Id: <0fe1c5853e3ab7fd392e16c74930615efae89a2f.1794367474.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Wed, 11 Nov 2026 14:24:34 +1100
+Subject: [PATCH] input: let a resume cancel a pause waiting for the buffering
+ to end
+
+A pause asked for while the input buffers is deferred until the
+buffering ends, and the input stays in its playing state meanwhile. A
+resume before then found nothing paused, did nothing, and left the
+pause to happen once the buffering ended: a player held as it opened
+(started paused, or paused straight after play) and resumed at once
+ended up paused, with nothing to resume it.
+---
+ src/input/input.c       |  2 ++
+ test/src/player/pause.c | 36 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 38 insertions(+)
+
+diff --git a/src/input/input.c b/src/input/input.c
+index 082389218d..5433d635ed 100644
+--- a/src/input/input.c
++++ b/src/input/input.c
+@@ -2161,6 +2161,8 @@ static bool Control( input_thread_t *p_input,
+                         ControlUnpause( p_input, i_control_date );
+                         b_force_update = true;
+                     }
++                    else
++                        priv->b_pause_after_buffering = false;
+                     break;
+                 case PAUSE_S:
+                     if( priv->i_state == PLAYING_S )
+diff --git a/test/src/player/pause.c b/test/src/player/pause.c
+index 9c31385ed9..de9467d50f 100644
+--- a/test/src/player/pause.c
++++ b/test/src/player/pause.c
+@@ -159,6 +159,41 @@ test_pause_get_time_increase(struct ctx *ctx)
+     test_end(ctx);
+ }
+ 
++static void
++test_resume_while_pause_deferred(struct ctx *ctx)
++{
++    /* A pause asked for while the input buffers waits for the buffering to
++     * end. A resume before then must cancel it rather than find nothing paused
++     * and leave it to happen. */
++    test_log("resume_while_pause_deferred\n");
++    vlc_player_t *player = ctx->player;
++
++    struct media_params params = DEFAULT_MEDIA_PARAMS(VLC_TICK_FROM_SEC(10));
++    params.pts_delay = VLC_TICK_FROM_SEC(1);
++    player_set_next_mock_media(ctx, "media1", &params);
++
++    vlc_player_SetStartPaused(player, true);
++    player_start(ctx);
++    vlc_player_Resume(player);
++
++    {
++        vec_on_position_changed *vec = &ctx->report.on_position_changed;
++        while (vec->size == 0)
++            vlc_player_CondWait(player, &ctx->wait);
++    }
++    vlc_player_Unlock(player);
++    vlc_tick_sleep(VLC_TICK_FROM_MS(300));
++    vlc_player_Lock(player);
++
++    vec_on_state_changed *states = &ctx->report.on_state_changed;
++    for (size_t i = 0; i < states->size; ++i)
++        assert(states->data[i] != VLC_PLAYER_STATE_PAUSED);
++    assert(vlc_player_GetState(player) == VLC_PLAYER_STATE_PLAYING);
++
++    vlc_player_SetStartPaused(player, false);
++    test_end(ctx);
++}
++
+ int
+ main(void)
+ {
+@@ -166,6 +201,7 @@ main(void)
+     ctx_init(&ctx, 0);
+     test_pause(&ctx);
+     test_pause_get_time_increase(&ctx);
++    test_resume_while_pause_deferred(&ctx);
+     ctx_destroy(&ctx);
+     return 0;
+ }
+-- 
+2.56.0
+

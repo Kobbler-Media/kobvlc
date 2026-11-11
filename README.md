@@ -36,6 +36,15 @@ Everything VideoLAN publishes stays theirs. This repo only holds what differs.
 | mediacodec: ask the image reader for what a SurfaceView asks | 10-bit HEVC played solid green on a Chromecast HD. The AImageReader whose images go straight to SurfaceFlinger asked for no usage, and Amlogic's decoders take a consumer without the composer bit for a SurfaceTexture: no compressed output, no attributes for the composer, and a 10-bit picture the video plane shows as green. It now asks for the composer and GPU usage a SurfaceView's queue gives a decoder (the GPU alone when VLC's OpenGL display samples the images). `android/test.sh` checks the usage. |
 | aaudio: fade in each new stream | Every flush (each seek, and each "way too late" or discontinuity flush after a stall) opens a new stream, and AudioFlinger ramps a pause down but gives a new track no ramp: each one started at full level mid-waveform and clicked. The first 10ms of a new stream, and of audio coming back after an underrun, now ramp in. `android/test.sh` checks the ramp. |
 | aaudio: wait for the pause without a dangling if | The wait for the paused state had lost its statement, leaving the next line to run only when the wait failed. |
+| decoder: grow the picture pool when nothing would give one back | Skipping into an HEVC title froze it for good. Each of libavcodec's ten frame threads made up the references the seek left it without, until they held all 40 pictures of the decoder's pool. The next request waited on the pool, the decoder thread waited on that request, and the input waited on the decoder's first picture, so the stop that followed never returned. The made-up references stay held until the decoder has decoded well past them. The pool now grows by a picture when it is empty and nothing is queued for display, which keeps only the picture on screen, or while the decoder is flushed or deleted. Grown pictures stay in the pool, and an output with pictures still to show throttles the decoder as before. VLC's decoder tests cover a decoder holding every picture before its first output, past it, and through a flush. |
+
+`patches/vlc-desktop/` — applied to the desktop build only, after `patches/vlc/`. They fix
+VLC code that came after the VLC libvlcjni pins, and go into `patches/vlc/` once Android
+builds the same VLC (see [docs/android-vlc-master.md](docs/android-vlc-master.md)):
+
+| Patch | Why |
+|---|---|
+| input: let a resume cancel a pause waiting for the buffering to end | A pause asked for while the input buffers waits for the buffering to end, and the input reads as playing meanwhile. A resume in that window found nothing paused and left the pause to land afterwards, so a title held as it opened (a preload, or a pause straight after play) and resumed at once stayed paused with nothing to resume it. VLC's player tests cover it. |
 
 `patches/libvlcjni/`:
 
@@ -44,6 +53,7 @@ Everything VideoLAN publishes stays theirs. This repo only holds what differs.
 | MediaPlayer: select the video track again when the surface returns | A paused video came back black after backgrounding. |
 | buildsystem: allow extra modules to be left out | Hooks `modules-blacklist` into the build. |
 | AWindow: keep the window size when a vout unregisters | The size belongs to the surface, which outlives the vout. Forgotten on unregister, a vout that registered next had nothing to replay and placed the picture at its source size from the top-left corner: a 640x360 episode after a 1080p one played as a small picture in the corner of a green screen. |
+| MediaPlayer: add resume() | `play()` only resumes a player that already reads as paused, so a pause still on its way (a preload held as it opened) landed after it and the title stayed paused. `resume()` queues behind the pause. |
 
 `modules-blacklist` — encoders, stream output, discs, network shares, scripting and the
 like, left out of both builds. See the file for the list and the reasoning.
@@ -99,6 +109,9 @@ Desktop moves by setting `VLC_DESKTOP_COMMIT` (and `DESKTOP_VERSION`, `4.0.0-<sh
 `linux/build.sh`, kobapp's desktop tests against it, then `linux/publish.sh` and bumping
 `libvlc-linux`. A vlcj release may need a newer VLC than the one pinned; its natives say which
 libvlc API it binds. The same patches apply to both trees.
+
+Moving Android onto the same VLC as desktop goes through libvlcjni's port to the reworked
+libvlc API: see [docs/android-vlc-master.md](docs/android-vlc-master.md).
 
 Every patch here is written to be sent upstream; each one VideoLAN takes is one less to carry.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Builds libvlc for Linux x86_64: VLC at VLC_DESKTOP_COMMIT with patches/vlc on top,
-# compiled in an Arch container against Arch's own libraries. Packaged as a relocatable
-# tree — libvlc finds its plugins next to itself — under work/linux.
+# Builds libvlc for Linux x86_64: VLC at VLC_DESKTOP_COMMIT with patches/vlc and
+# patches/vlc-desktop on top, compiled in an Arch container against Arch's own libraries.
+# Packaged as a relocatable tree — libvlc finds its plugins next to itself — under work/linux.
 #
 # The libraries it links (ffmpeg, libva, libass, ...) come from the system at run time, so
 # the result runs on Arch and its derivatives, and needs a rebuild when one of them
@@ -21,7 +21,7 @@ GIT_AS_BUILD=(git -c user.name=kobvlc -c user.email=kobvlc@build.invalid -c comm
 git -C "$SRC" cat-file -e "$VLC_DESKTOP_COMMIT" 2>/dev/null || git -C "$SRC" fetch -q origin "$VLC_DESKTOP_COMMIT"
 git -C "$SRC" am --abort 2>/dev/null || true
 git -C "$SRC" reset -q --hard "$VLC_DESKTOP_COMMIT"
-"${GIT_AS_BUILD[@]}" -C "$SRC" am -q "$ROOT"/patches/vlc/*.patch
+"${GIT_AS_BUILD[@]}" -C "$SRC" am -q "$ROOT"/patches/vlc/*.patch "$ROOT"/patches/vlc-desktop/*.patch
 
 BLACKLIST="$(grep -vE '^\s*(#|$)' "$ROOT/modules-blacklist" | paste -sd'|')"
 
