@@ -1,8 +1,10 @@
-From c085031d73b29621a89a3b3c58db6af3229500c6 Mon Sep 17 00:00:00 2001
-Message-Id: <c085031d73b29621a89a3b3c58db6af3229500c6.1793102078.git.dev@kobbler.invalid>
+From 549435c70cce296930aea901ef40f35dde9bc15d Mon Sep 17 00:00:00 2001
+Message-Id: <549435c70cce296930aea901ef40f35dde9bc15d.1794375661.git.dev@kobbler.invalid>
+In-Reply-To: <41ab356bfcd3a9a8d1244194a95d0e5daf28e9d3.1794375661.git.dev@kobbler.invalid>
+References: <41ab356bfcd3a9a8d1244194a95d0e5daf28e9d3.1794375661.git.dev@kobbler.invalid>
 From: Kobbler-Media <dev@kobbler.invalid>
 Date: Tue, 27 Oct 2026 22:54:38 +1100
-Subject: [PATCH] AWindow: keep the window size when a vout unregisters
+Subject: [PATCH 3/4] AWindow: keep the window size when a vout unregisters
 
 The size is the surface's, and the surface outlives the vout. Forgetting
 it on unregister left the next vout with nothing to replay when it

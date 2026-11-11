@@ -1,8 +1,8 @@
-From f61c55ec7b0c987552d108b888c60432778bd11b Mon Sep 17 00:00:00 2001
-Message-Id: <f61c55ec7b0c987552d108b888c60432778bd11b.1791968979.git.dev@kobbler.invalid>
+From 41ab356bfcd3a9a8d1244194a95d0e5daf28e9d3 Mon Sep 17 00:00:00 2001
+Message-Id: <41ab356bfcd3a9a8d1244194a95d0e5daf28e9d3.1794375661.git.dev@kobbler.invalid>
 From: Kobbler-Media <dev@kobbler.invalid>
 Date: Wed, 14 Oct 2026 20:09:05 +1100
-Subject: [PATCH 1/2] MediaPlayer: select the video track again when the
+Subject: [PATCH 1/4] MediaPlayer: select the video track again when the
  surface returns
 
 The player keeps the vout of a deselected track for reuse, so the vout
@@ -14,10 +14,10 @@ black.
  1 file changed, 10 insertions(+), 2 deletions(-)
 
 diff --git a/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java b/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java
-index 57ea5cb..54a0508 100644
+index 8f84499..64e8b18 100644
 --- a/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java
 +++ b/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java
-@@ -449,8 +449,9 @@ public class MediaPlayer extends VLCObject<MediaPlayer.Event> {
+@@ -617,8 +617,9 @@ public class MediaPlayer extends VLCObject {
              synchronized (MediaPlayer.this) {
                  if (!mPlaying && mPlayRequested)
                      play = true;
@@ -28,7 +28,7 @@ index 57ea5cb..54a0508 100644
              }
              if (play)
                  play();
-@@ -462,14 +463,21 @@ public class MediaPlayer extends VLCObject<MediaPlayer.Event> {
+@@ -630,14 +631,21 @@ public class MediaPlayer extends VLCObject {
          public void onSurfacesDestroyed(AWindow vout) {
              boolean disableVideo = false;
              synchronized (MediaPlayer.this) {

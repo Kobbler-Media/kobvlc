@@ -1,0 +1,115 @@
+From cce0d36a904a5cae3d542a5823ef44b9f4aa33fa Mon Sep 17 00:00:00 2001
+Message-Id: <cce0d36a904a5cae3d542a5823ef44b9f4aa33fa.1794386619.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Wed, 11 Nov 2026 19:43:39 +1100
+Subject: [PATCH] http: h2conn: ignore frames on streams we reset
+
+Closing a stream before its end (a seek, or a stop) sends RST_STREAM,
+but the peer has by then sent up to a whole receive window of DATA
+(1 MiB) that it cannot take back. Each of those frames found no stream,
+was logged as an error and answered with an RST_STREAM of its own: a
+couple of hundred error lines and resets per seek.
+
+RFC 9113 section 5.1 says to ignore frames on a stream after resetting
+it. Frames on a stream identifier never handed out are still errors.
+The connection window was already credited before the stream lookup,
+so the ignored frames still count against flow control.
+---
+ modules/access/http/h2conn.c      | 19 ++++++++++++++++++-
+ modules/access/http/h2conn_test.c | 11 ++++++++---
+ 2 files changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/modules/access/http/h2conn.c b/modules/access/http/h2conn.c
+index bd083a6eb3..697598b678 100644
+--- a/modules/access/http/h2conn.c
++++ b/modules/access/http/h2conn.c
+@@ -56,6 +56,7 @@ struct vlc_h2_conn
+ 
+     struct vlc_h2_stream *streams; /**< List of open streams */
+     uint32_t next_id; /**< Next free stream identifier */
++    uint32_t last_id; /**< Last stream identifier handed out */
+     bool released; /**< Connection released by owner */
+ 
+     uint32_t max_send_frame; /**< Maximum sent frame size */
+@@ -133,6 +134,20 @@ static int vlc_h2_stream_error(void *ctx, uint_fast32_t id, uint_fast32_t code)
+     return vlc_h2_conn_queue(conn, vlc_h2_frame_rst_stream(id, code));
+ }
+ 
++/** Reports a stream error found by the parser */
++static int vlc_h2_stream_parse_error(void *ctx, uint_fast32_t id,
++                                     uint_fast32_t code)
++{
++    struct vlc_h2_conn *conn = ctx;
++
++    /* Once we reset a stream, the peer may still have sent a whole window of
++     * frames on it. RFC 9113 §5.1 says to ignore those. */
++    if ((id & 1) && id <= conn->last_id
++     && vlc_h2_stream_lookup(conn, id) == NULL)
++        return 0;
++    return vlc_h2_stream_error(conn, id, code);
++}
++
+ static int vlc_h2_stream_fatal(struct vlc_h2_stream *s, uint_fast32_t code)
+ {
+     s->recv_end = true;
+@@ -537,6 +552,7 @@ static struct vlc_http_stream *vlc_h2_stream_open(struct vlc_http_conn *c,
+     }
+ 
+     s->id = conn->next_id;
++    conn->last_id = s->id;
+     conn->next_id += 2;
+ 
+     struct vlc_h2_frame *f = vlc_http_msg_h2_frame(msg, s->id, !has_data);
+@@ -685,7 +701,7 @@ static const struct vlc_h2_parser_cbs vlc_h2_parser_callbacks =
+     vlc_h2_window_status,
+     vlc_h2_window_update,
+     vlc_h2_stream_lookup,
+-    vlc_h2_stream_error,
++    vlc_h2_stream_parse_error,
+     vlc_h2_stream_headers,
+     vlc_h2_stream_data,
+     vlc_h2_stream_end,
+@@ -888,6 +904,7 @@ struct vlc_http_conn *vlc_h2_conn_create(void *ctx, struct vlc_tls *tls)
+     conn->opaque = ctx;
+     conn->streams = NULL;
+     conn->next_id = 1; /* TODO: server side */
++    conn->last_id = 0;
+     conn->released = false;
+     conn->max_send_frame = VLC_H2_DEFAULT_MAX_FRAME;
+     conn->init_send_cwnd = VLC_H2_DEFAULT_INIT_WINDOW;
+diff --git a/modules/access/http/h2conn_test.c b/modules/access/http/h2conn_test.c
+index e313bf8216..65fd7f79d3 100644
+--- a/modules/access/http/h2conn_test.c
++++ b/modules/access/http/h2conn_test.c
+@@ -195,13 +195,14 @@ int main(void)
+     assert(m != NULL);
+     vlc_http_msg_destroy(m);
+ 
+-    stream_data(3, "Hello ", false); /* late data */
++    stream_data(3, "Hello ", false); /* late data, to be ignored */
++    stream_reply(3, false);
+     stream_data(3, "world!", true);
++    conn_send(vlc_h2_frame_ping(42));
+ 
+     conn_expect(HEADERS);
+     conn_expect(RST_STREAM);
+-    conn_expect(RST_STREAM);
+-    conn_expect(RST_STREAM);
++    conn_expect(PING);
+ 
+     /* Test continuation then accepted stream */
+     sid += 2;
+@@ -281,6 +282,10 @@ int main(void)
+     /* Test nonexistent stream reset */
+     conn_send(vlc_h2_frame_rst_stream(sid + 100, VLC_H2_REFUSED_STREAM));
+ 
++    /* Test data on a stream never opened */
++    stream_data(sid + 100, "Unsolicited", false);
++    conn_expect(RST_STREAM);
++
+     /* Test multiple streams in non-LIFO order */
+     sid += 2;
+     s = stream_open(false);
+-- 
+2.56.0
+

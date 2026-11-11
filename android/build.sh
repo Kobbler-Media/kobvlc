@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Builds the libvlc-all AAR: VideoLAN's libvlcjni at the pinned commit with patches/ on
-# top, compiled in VideoLAN's own Android image against their prebuilt contribs, then
-# laid out as a Maven repository under work/maven.
+# Builds the libvlc-all AAR: VideoLAN's libvlcjni at the pinned commit and VLC at
+# VLC_COMMIT, with patches/ on top, compiled in VideoLAN's own Android image against their
+# prebuilt contribs, then laid out as a Maven repository under work/maven.
 #
 #   android/build.sh                 every ABI
 #   android/build.sh arm64 arm       just those (an AAR for testing on those devices)
@@ -26,9 +26,9 @@ declare -A TRIPLETS=(
 mkdir -p "$WORK"
 
 # libvlcjni, reset to the pin with our patches applied. The VLC patches join its own
-# series, after upstream's, so get-vlc applies the lot in order.
+# series, after upstream's, so the lot applies in order below.
 [ -d "$JNI/.git" ] || git clone -q "$LIBVLCJNI_URL" "$JNI"
-git -C "$JNI" cat-file -e "$LIBVLCJNI_COMMIT" 2>/dev/null || git -C "$JNI" fetch -q origin
+git -C "$JNI" cat-file -e "$LIBVLCJNI_COMMIT" 2>/dev/null || git -C "$JNI" fetch -q origin "$LIBVLCJNI_REF"
 # A run that stopped on a patch that no longer applies leaves the series half applied.
 git -C "$JNI" am --abort 2>/dev/null || true
 git -C "$JNI" reset -q --hard "$LIBVLCJNI_COMMIT"
@@ -38,17 +38,14 @@ for p in "$ROOT"/patches/vlc/*.patch; do
   cp "$p" "$JNI/libvlc/patches/kob-$(basename "$p")"
 done
 
-# VLC at the commit libvlcjni pins. An existing tree is reset rather than recloned, so
-# only the files the patches touch are rebuilt.
-VLC_HASH="$(sed -n 's/^VLC_TESTED_HASH=//p' "$JNI/buildsystem/get-vlc.sh")"
-if [ -d "$VLC/.git" ]; then
-  git -C "$VLC" cat-file -e "$VLC_HASH" 2>/dev/null || git -C "$VLC" fetch -q origin
-  git -C "$VLC" am --abort 2>/dev/null || true
-  git -C "$VLC" reset -q --hard "$VLC_HASH"
-  "${GIT_AS_BUILD[@]}" -C "$VLC" am -q --message-id "$JNI"/libvlc/patches/*.patch
-else
-  (cd "$JNI" && ./buildsystem/get-vlc.sh)
-fi
+# VLC at VLC_COMMIT, the one the desktop build uses, rather than libvlcjni's
+# VLC_TESTED_HASH. An existing tree is reset rather than recloned, so only the files the
+# patches touch are rebuilt.
+[ -d "$VLC/.git" ] || git clone -q --no-checkout "$VLC_URL" "$VLC"
+git -C "$VLC" cat-file -e "$VLC_COMMIT" 2>/dev/null || git -C "$VLC" fetch -q origin "$VLC_COMMIT"
+git -C "$VLC" am --abort 2>/dev/null || true
+git -C "$VLC" reset -q --hard "$VLC_COMMIT"
+"${GIT_AS_BUILD[@]}" -C "$VLC" am -q --message-id "$JNI"/libvlc/patches/*.patch
 
 BUILD_IMAGE="$(sed -n 's/^ *image: *//p' "$JNI/buildsystem/gitlab/.gitlab-ci.yml" | head -n1)"
 [ -n "$BUILD_IMAGE" ] || { echo "no build image in libvlcjni's CI file" >&2; exit 1; }
@@ -59,7 +56,7 @@ for abi in "${ABIS[@]}"; do
   triplet="${TRIPLETS[$abi]}"
   sha="$(cd "$VLC" && extras/ci/get-contrib-sha.sh "android-$abi")"
   docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp \
-    -e VLC_PREBUILT_CONTRIBS_URL="https://artifacts.videolan.org/vlc/android-$abi/vlc-contrib-$triplet-$sha.tar.bz2" \
+    -e VLC_PREBUILT_CONTRIBS_URL="https://artifacts.videolan.org/vlc/android-$abi/vlc-contrib-$triplet-$sha.tar.zst" \
     -e VLC_MODULE_BLACKLIST_EXTRA="$BLACKLIST_EXTRA" \
     -v "$JNI:/src" -w /src "$BUILD_IMAGE" \
     ./buildsystem/compile-libvlc.sh -a "$abi" --release --with-prebuilt-contribs

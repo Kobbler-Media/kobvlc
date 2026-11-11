@@ -1,8 +1,10 @@
-From 67fb6385be9d063242f5c75cf5de744bd4fca0db Mon Sep 17 00:00:00 2001
-Message-Id: <67fb6385be9d063242f5c75cf5de744bd4fca0db.1794367587.git.dev@kobbler.invalid>
+From 616752ea5e7bd6a00a7e518e8e6f8de201f00f71 Mon Sep 17 00:00:00 2001
+Message-Id: <616752ea5e7bd6a00a7e518e8e6f8de201f00f71.1794375661.git.dev@kobbler.invalid>
+In-Reply-To: <41ab356bfcd3a9a8d1244194a95d0e5daf28e9d3.1794375661.git.dev@kobbler.invalid>
+References: <41ab356bfcd3a9a8d1244194a95d0e5daf28e9d3.1794375661.git.dev@kobbler.invalid>
 From: Kobbler-Media <dev@kobbler.invalid>
-Date: Wed, 11 Nov 2026 14:26:27 +1100
-Subject: [PATCH] MediaPlayer: add resume()
+Date: Wed, 11 Nov 2026 16:40:49 +1100
+Subject: [PATCH 4/4] MediaPlayer: add resume()
 
 play() only resumes a player that already reads as paused. A pause
 given just before, still on its way to the input, was left to land
@@ -14,10 +16,10 @@ resume() asks libvlc to resume, which queues behind the pause.
  2 files changed, 19 insertions(+)
 
 diff --git a/libvlc/jni/libvlcjni-mediaplayer.c b/libvlc/jni/libvlcjni-mediaplayer.c
-index 1797e19..fcd0ec2 100644
+index 3593d0a..ee25a3c 100644
 --- a/libvlc/jni/libvlcjni-mediaplayer.c
 +++ b/libvlc/jni/libvlcjni-mediaplayer.c
-@@ -385,6 +385,17 @@ Java_org_videolan_libvlc_MediaPlayer_pause(JNIEnv *env, jobject thiz)
+@@ -763,6 +763,17 @@ Java_org_videolan_libvlc_MediaPlayer_pause(JNIEnv *env, jobject thiz)
      libvlc_media_player_set_pause(p_obj->u.p_mp, 1);
  }
  
@@ -36,10 +38,10 @@ index 1797e19..fcd0ec2 100644
  Java_org_videolan_libvlc_MediaPlayer_getPlayerState(JNIEnv *env, jobject thiz)
  {
 diff --git a/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java b/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java
-index 54a0508..d66f2e2 100644
+index 64e8b18..1e014d1 100644
 --- a/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java
 +++ b/libvlc/src/main/java/org/videolan/libvlc/MediaPlayer.java
-@@ -1313,6 +1313,14 @@ public class MediaPlayer extends VLCObject<MediaPlayer.Event> {
+@@ -1500,6 +1500,14 @@ public class MediaPlayer extends VLCObject {
       */
      public native void pause();
  
@@ -52,7 +54,7 @@ index 54a0508..d66f2e2 100644
 +    public native void resume();
 +
      /**
-      * Get player state.
+      * Get player state, see {@link State}.
       */
 -- 
 2.56.0

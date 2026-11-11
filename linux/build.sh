@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds libvlc for Linux x86_64: VLC at VLC_DESKTOP_COMMIT with patches/vlc and
-# patches/vlc-desktop on top, compiled in an Arch container against Arch's own libraries.
+# Builds libvlc for Linux x86_64: VLC at VLC_COMMIT with patches/vlc on top, compiled in
+# an Arch container against Arch's own libraries.
 # Packaged as a relocatable tree — libvlc finds its plugins next to itself — under work/linux.
 #
 # The libraries it links (ffmpeg, libva, libass, ...) come from the system at run time, so
@@ -18,10 +18,10 @@ IMAGE=archlinux:base-devel
 GIT_AS_BUILD=(git -c user.name=kobvlc -c user.email=kobvlc@build.invalid -c commit.gpgsign=false)
 
 [ -d "$SRC/.git" ] || git clone -q --no-checkout "$VLC_URL" "$SRC"
-git -C "$SRC" cat-file -e "$VLC_DESKTOP_COMMIT" 2>/dev/null || git -C "$SRC" fetch -q origin "$VLC_DESKTOP_COMMIT"
+git -C "$SRC" cat-file -e "$VLC_COMMIT" 2>/dev/null || git -C "$SRC" fetch -q origin "$VLC_COMMIT"
 git -C "$SRC" am --abort 2>/dev/null || true
-git -C "$SRC" reset -q --hard "$VLC_DESKTOP_COMMIT"
-"${GIT_AS_BUILD[@]}" -C "$SRC" am -q "$ROOT"/patches/vlc/*.patch "$ROOT"/patches/vlc-desktop/*.patch
+git -C "$SRC" reset -q --hard "$VLC_COMMIT"
+"${GIT_AS_BUILD[@]}" -C "$SRC" am -q "$ROOT"/patches/vlc/*.patch
 
 BLACKLIST="$(grep -vE '^\s*(#|$)' "$ROOT/modules-blacklist" | paste -sd'|')"
 
@@ -90,6 +90,6 @@ for helper in "$TREE"/lib/vlc/*.so; do by_soname "$helper" "$OUT/pkg/lib/vlc"; d
 rm -rf "$OUT/pkg/lib/vlc/vlc-cache-gen" "$OUT/pkg/lib/vlc/lua"
 strip --strip-unneeded "$OUT"/pkg/lib/libvlc*.so* $(find "$OUT/pkg/lib/vlc/plugins" -name '*.so')
 
-ARCHIVE="$OUT/libvlc-linux-x64-$DESKTOP_VERSION.tar.gz"
+ARCHIVE="$OUT/libvlc-linux-x64-$VERSION.tar.gz"
 tar -C "$OUT/pkg" -czf "$ARCHIVE" lib
 echo "built $ARCHIVE ($(du -h "$ARCHIVE" | cut -f1), $(find "$OUT/pkg/lib/vlc/plugins" -name '*.so' | wc -l) plugins)"

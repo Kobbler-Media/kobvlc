@@ -1,10 +1,10 @@
-From 205481f855c1e8e2561706fc4b5f04ac0a2014e7 Mon Sep 17 00:00:00 2001
-Message-Id: <205481f855c1e8e2561706fc4b5f04ac0a2014e7.1791968979.git.dev@kobbler.invalid>
-In-Reply-To: <f61c55ec7b0c987552d108b888c60432778bd11b.1791968979.git.dev@kobbler.invalid>
-References: <f61c55ec7b0c987552d108b888c60432778bd11b.1791968979.git.dev@kobbler.invalid>
+From cd759bc4a660dd132633db1314acae8a5a8be768 Mon Sep 17 00:00:00 2001
+Message-Id: <cd759bc4a660dd132633db1314acae8a5a8be768.1794375661.git.dev@kobbler.invalid>
+In-Reply-To: <41ab356bfcd3a9a8d1244194a95d0e5daf28e9d3.1794375661.git.dev@kobbler.invalid>
+References: <41ab356bfcd3a9a8d1244194a95d0e5daf28e9d3.1794375661.git.dev@kobbler.invalid>
 From: Kobbler-Media <dev@kobbler.invalid>
 Date: Wed, 14 Oct 2026 20:09:05 +1100
-Subject: [PATCH 2/2] buildsystem: allow extra modules to be left out of libvlc
+Subject: [PATCH 2/4] buildsystem: allow extra modules to be left out of libvlc
 
 VLC_MODULE_BLACKLIST_EXTRA is appended to the module blacklist, so a
 build can drop the modules it does not need without patching the list.

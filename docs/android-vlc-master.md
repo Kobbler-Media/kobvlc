@@ -1,125 +1,90 @@
 # Android on VLC master
 
-Plan for building Android and desktop from one VLC, with one patch series, and for sharing
-more of kobapp's player code between them once both bind the same libvlc API. Written
-2026-11-11; the numbers below are from that day.
+Android and desktop build one VLC with one patch series, and kobapp's two VLC players bind
+the same reworked libvlc API. This is how that came about, and what is still open.
 
-## Where things stand
+## Where things stand (2026-11-11)
 
 | | Android | Desktop |
 |---|---|---|
-| Binding | libvlcjni `a8d53a91` (master, 2026-07-08) | vlcj 5.0.0-M6 |
-| VLC | `c84ef1ed` (2026-06-13), libvlcjni's `VLC_TESTED_HASH` | `fb39292a` (master, 2026-11-10) |
-| libvlc API | before the June 2026 rework | after it |
-| Patches | `patches/vlc/` | `patches/vlc/` + `patches/vlc-desktop/` |
+| Binding | libvlcjni MR !246 head `6ad75b5d` | vlcj 5.0.0-M6 |
+| VLC | `fb39292a` (master, 2026-11-10) | the same |
+| Patches | `patches/vlc/` + `patches/libvlcjni/` | `patches/vlc/` |
+| Version | `4.0.0-fb39292a-kob2` | the same |
 
-Android's VLC is 2,191 commits behind master, 69 of them in code Android plays through
-(mediacodec, the Android display and audio outputs, decoder, player, http, mkv). libvlcjni
-master binds the libvlc API from before the rework (event manager, media events, `parse()`),
-so it does not build against VLC master, and Android cannot move on its own.
+Before this, Android built libvlcjni master's VLC (`c84ef1ed`, June 2026), 2,191 commits
+behind desktop's, against the libvlc API from before the June 2026 rework. Every patch was
+applied to two VLCs five months apart, and one desktop fix (the pause deferred to the end of
+buffering) had nowhere to go on Android.
 
-Every patch is applied to two VLCs five months apart. `patches/vlc-desktop/` already holds
-one fix for code Android's VLC does not have yet (the pause deferred to the end of
-buffering), and the next one will not apply to both either.
+## How
 
-## The way across: libvlcjni MR !246
+- **libvlcjni at [MR !246](https://code.videolan.org/videolan/libvlcjni/-/merge_requests/246)**,
+  "Port libvlcjni to the reworked libvlc 4 API": open, CI green, unchanged since 2026-10-30.
+  `android/build.sh` fetches it from `LIBVLCJNI_REF`, since `origin` does not carry MR refs.
+- **VLC at `VLC_COMMIT`**, not the MR's `VLC_TESTED_HASH` (`15b71e3f`): Android went straight to
+  desktop's VLC. libvlc's API differs between the two only in `libvlc_audio_flush_cb`, which
+  libvlcjni does not use. libvlcjni's own VLC patches apply to it unchanged.
+- **Prebuilt contribs.** VideoLAN's CI packages Android contribs for most contrib changes on
+  master, now as `.tar.zst`; `978212a4`, the contrib commit at `fb39292a`, has them for all
+  four ABIs. None exist for the MR's VLC, which is why it was skipped.
+- **`patches/vlc-desktop/` folded into `patches/vlc/`** as 0017.
+- **`patches/libvlcjni/0004` (`resume()`)** ported to the rewritten `MediaPlayer`; the MR has no
+  resume. 0001 (select the video track again when the surface returns) applies and still fits
+  the rewritten surface callbacks.
 
-https://code.videolan.org/videolan/libvlcjni/-/merge_requests/246, "Port libvlcjni to
-the reworked libvlc 4 API". Open, mergeable, CI green, last updated 2026-10-30. Head
-`6ad75b5dbc39`, fetchable as `refs/merge-requests/246/head`.
+kobapp's `AndroidPlayer` moved to the MR's API:
 
-- Pins VLC `15b71e3fa6d4` (2026-09-23): an ancestor of the desktop pin, 506 commits behind
-  it.
-- All of `patches/vlc/` and `patches/vlc-desktop/` apply to that VLC.
-- `patches/libvlcjni/` 0001–0003 apply to the MR head. 0004 (`MediaPlayer.resume()`) does
-  not: `MediaPlayer` was rewritten, and it needs porting. 0001 (select the video track
-  again when the surface returns) applies, but needs checking against the rewritten
-  `MediaPlayer`.
+- events come through a `MediaPlayer.Listener` given at construction, mapped as desktop maps
+  vlcj's: `onStateChanged` (opening, playing, paused, error), `onMediaStopping` (the end or
+  stop, through `stateOnStopping`), `onBufferingChanged` (a fraction now),
+  `onCapabilitiesChanged` (pausable), `onPositionChanged`, `onLengthChanged`,
+  `onTrackListChanged`, `onTrackSelectionChanged`, `onVoutChanged`;
+- times are microseconds;
+- `stop()` is `stopAsync()`; a stop that a new title or `Player.stop()` waits on polls for the
+  input to go (now the shared `stopAndWait`);
+- `Media` takes no `LibVLC`.
 
-What the MR changes for its users (a breaking Java API change):
+## Checked on devices
 
-- Events go: each object takes a `Listener` at construction, with per-object callbacks.
-  Objects passed to callbacks are borrowed; `retain()` keeps them. Nothing is delivered after
-  `release()`. Callbacks arrive on the main thread.
-- Times are microseconds: `getTime()`, `setTime()` (now returns `int`), `getLength()`,
-  `Media.getDuration()`, chapter and title durations.
-- `stop()` becomes `stopAsync()`. `onStateChanged(Stopped)` reports the end of the stop.
-- `IMedia.State` moves to `MediaPlayer.State`, with libvlc 4's values (`Ended` becomes
-  `Stopping`).
-- `Media.parse()`, `parseAsync()`, `IMedia.Parse` and `IMedia.ParsedStatus` go; `Parser`
-  replaces them, and thumbnails and attachments come back as `Picture`.
-- `MediaList` goes.
+Pixel 6 Pro (arm64), Debug profile, South Park S1 (H.264 720p MKV over HTTP/2):
+MediaCodec (`c2.exynos.h264.decoder`) through ASurfaceControl, AAudio, resume at the saved
+mark, pause and resume, seek, a paused picture back after backgrounding, the next episode
+opened mid-title, and a title's end playing the next one.
 
-## Steps
+Chromecast HD (armeabi-v7a): Law & Order S1E1, HEVC Main 10 960x720 on
+`c2.amlogic.hevc.decoder`, two bursts of skips with playback carrying on and no stall
+reported. The colour of the 10-bit picture needs eyes on the TV: screencap shows the video
+plane black.
 
-1. **Pin libvlcjni at the MR.** `LIBVLCJNI_COMMIT=6ad75b5dbc39…`, fetched from the MR ref
-   (`android/build.sh` fetches `origin`, which does not carry MR refs). Move to the merge
-   commit once VideoLAN merges it; if it changes before then, follow it.
-2. **Build the contribs.** VideoLAN publishes prebuilt Android contribs only for the hashes
-   its CI packaged, and neither the MR's VLC nor master has them (404 at
-   `artifacts.videolan.org/vlc/android-arm64/…`). `buildsystem/compile-libvlc.sh` builds them
-   from source without `--with-prebuilt-contribs`, and `--package-contribs` packages them.
-   Build once per ABI and keep the packages under `work/`, keyed by
-   `extras/ci/get-contrib-sha.sh`, so a rebuild reuses them. Take the build image from VLC's
-   own CI file at that hash if libvlcjni's no longer matches.
-3. **Land on the MR's VLC first** (`15b71e3f`): it is what the MR was tested against. Build,
-   run `android/test.sh`, try it on devices (below).
-4. **Then one VLC for both.** Move Android to the desktop pin, replace
-   `VLC_DESKTOP_COMMIT`/`DESKTOP_VERSION` in `versions.env` with one VLC commit, fold
-   `patches/vlc-desktop/` into `patches/vlc/`, and drop the split from `linux/build.sh` and
-   the README.
-5. **Port `patches/libvlcjni/0004`** (`resume()`) to the rewritten `MediaPlayer`, or drop it
-   if the MR's API offers a resume (`libvlc_media_player_set_pause(mp, 0)`).
-6. **Port kobapp's `AndroidPlayer`** (`kobplayer/src/androidMain`). It is the only file in
-   kobapp that touches libvlcjni, about 25 call sites:
-   - the `MediaPlayer.Event` handler (`listenTo`) becomes a `Listener`;
-   - `time`, `length`, `setTime` move to microseconds;
-   - every `stop()` becomes `stopAsync()`. `CommandLane.replaceTitle`'s stop has to wait
-     for the stop to finish before the next title opens, or media handed to a player that
-     is still playing is swapped in without an opening;
-   - `IMedia.State` becomes `MediaPlayer.State`;
-   - `Media.stats` (`sampleDecoder`) and anything else the MR moved.
-7. **Verify on devices.** Pixel 6 Pro and Chromecast HD (the `boreal` devices on adb). Check
-   what the Android patches fixed: frame pacing at 24/25fps on 60Hz (`android/test.sh` covers
-   the maths, the panel shows the rest), 10-bit HEVC on the Chromecast (was solid green),
-   AAudio fade-in and sample rate, a video track coming back after backgrounding, a smaller
-   episode after a 1080p one (was drawn in the corner), resume after a long pause on a burst
-   read, and a skip in an HEVC title.
+`android/test.sh` passes against the new tree (pacing, image reader usage, AAudio fade).
 
-## Sharing player code
+Not rechecked: frame pacing as the panel shows it, a smaller episode after a 1080p one,
+resume after a long pause on a burst read.
 
-With both bindings on the reworked libvlc API, `AndroidPlayer` (about 980 lines) and
-`DesktopPlayer` (about 700) differ mostly in the binding underneath, not in what they do
-with it. Already shared in `commonMain`: `CommandLane` (one thread per native player, stuck
-calls escaped and reported), the state helpers (`stateOnStopping`, `stateOnBuffering`,
-`stateAfterClockAdvance`, `playPauseIntent`), `watchFrozenClock`, seek clamping, `PlayerStall`.
+## Open
 
-Duplicated today, and worth one implementation:
+- **Follow the MR.** Move `LIBVLCJNI_COMMIT` to the merge commit (`LIBVLCJNI_REF=master`) once
+  VideoLAN merges it; if it changes before then, follow it. It is a breaking Java API change,
+  so it may take a while.
 
-- holding a title asked to pause before it can (`pausable`, `pauseWhenPausable`,
-  `holdIfAsked`), and the resume that cancels it;
-- picking a title back up on a fresh player (`resumeTitle`) and adopting it;
-- the event handling that maps libvlc's playing, paused, buffering, end and error onto
-  `PlayerState`, including ignoring events from a retired input (`inputRetired`);
-- track and chapter reloads, and declining the default subtitle VLC picks after the app asked
-  for none;
-- media options (`vlcMediaOptions` on desktop, `media()` on Android build the same list).
+## Fixed since
 
-A shape for it: a small `VlcBinding` interface in `commonMain` (open, play, stop, pause,
-resume, set time and rate, tracks, chapters, and a listener for libvlc's callbacks), a vlcj
-adapter on desktop and a libvlcjni adapter on Android, and one `VlcPlayer` in common that
-holds the state machine above. What stays per platform: Android's surfaces, audio focus and
-routing, MediaCodec decoder choices and field-decode probing; desktop's frame sink and
-decoder device. The iOS port's VLCKit 4 (also libvlc 4) could take a third adapter.
+- **HTTP/2 noise after a cancelled transfer** (`patches/vlc/0018`). Each DATA frame already in
+  flight for a stream VLC reset (every seek, through `patches/vlc/0002`) was logged as "local
+  stream N error: Stream closed" and answered with another RST_STREAM: 67 and 125 frames
+  after two seeks on the Pixel, so at most the 1 MiB stream window the server may have in
+  flight, never more. Nothing was hiding there; RFC 9113 §5.1 says to ignore such frames, and
+  the patch does, for streams VLC opened and closed only.
 
-Do this after step 6, not with it: porting `AndroidPlayer` to the new API and then lifting
-the shared part out are two reviewable changes, and the second is much smaller once the first
-has made the two players line up.
+## Shared player code
 
-## Risks
-
-- The MR is unmerged and may change. It is also a breaking Java API change, which is why
-  VideoLAN may take a while over it.
-- 2,191 VLC commits land on Android at once. The device checks above are the safety net.
-  Bisecting means building VLC between `c84ef1ed` and the new pin, with contribs.
-- Building contribs from source is hours the first time for four ABIs. Keep the packages.
+`VlcPlayer` in `commonMain` (kobapp's kobplayer) holds what both players do with libVLC 4: the
+state machine its events drive, ignoring events from a retired input, holding a pause asked
+for before the input can take it, picking a title back up on a fresh player after a stall,
+stopping and waiting for the input to go, seeks, tracks, chapters, declining the subtitle VLC
+picks after the app asked for none, and the media options. Each platform binds it through a
+small `VlcBinding`: `VlcjBinding` on desktop, `LibVlcBinding` on Android. What stays per
+platform: Android's surfaces, audio focus and routing, MediaCodec decoder choices and
+field-decode probing; desktop's frame sink, gain fades and decoder device. The iOS port's
+VLCKit 4 (also libvlc 4) would be a third binding.
