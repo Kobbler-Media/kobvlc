@@ -1,53 +1,94 @@
-From 66baa2eb849e790939679a544107d1c513ea0af0 Mon Sep 17 00:00:00 2001
-Message-Id: <66baa2eb849e790939679a544107d1c513ea0af0.1795066386.git.dev@kobbler.invalid>
+From 7569a748d6d008513cbf39061bc4db416ff59617 Mon Sep 17 00:00:00 2001
+Message-Id: <7569a748d6d008513cbf39061bc4db416ff59617.1795068663.git.dev@kobbler.invalid>
 From: Kobbler-Media <dev@kobbler.invalid>
 Date: Thu, 19 Nov 2026 13:27:44 +1100
-Subject: [PATCH] input_clock: do not judge the PCR read on from a new
- reference
+Subject: [PATCH 19/20] input_clock: measure a paced input's gaps against its
+ last step
 
 The gap check compares how far the stream moved between two PCRs with how
 far the system date moved. For an input VLC paces itself (a file, HTTP)
-the system date of a PCR is only when the input got to it: the input
-reads until the clock's wake-up date, the date of the last PCR. While on
-schedule that is the last step's length, so the check compares each step
-with the one before.
+the system date of a PCR is only when the input got to it. On schedule
+the input reads on once the clock's wake-up date, the date of the last
+PCR, is due, so its system date moves by the last step and the check
+compares each step with the one before. Whenever the input is behind,
+after a new reference or a stall on the network, it reads on at once and
+the system date only measures how long the demuxer took.
 
-A new reference makes its own PCR due at once, so the input reads on to
-the next without waiting and that PCR's system date is only the time it
-took to demux. Any stream whose PCRs are more than 300ms apart then trips
-the check, which takes a new reference at the PCR just read, and so on
-for every PCR: each one starts a new output clock context. A Matroska
-episode with E-AC3 laced 8 frames a block and B-frames in groups of 6
-gets a PCR every 360ms, and from a resume played its position nearly
-twice as fast as real time, 40s ahead of the picture within a minute.
+So once a stream's PCRs come more than 300ms apart, the check trips each
+time the input falls behind. The new reference then makes the PCR just
+read due at once, the next is read at once and trips it again, and so on:
+every PCR starts a new output clock context and the position runs ahead
+of real time. A Matroska episode whose PCR now and then jumped 360ms
+played its position nearly twice as fast as real time from one such
+jump, 40s ahead of the picture within a minute.
 
-On a paced input, the PCR after a new reference is now let through like
-the one after an origin change. A step that grows by more than 300ms
-still takes a new reference, once, and a stream going backward is still a
-discontinuity.
+A paced input's gap is now measured against its last step, what its
+system date moves by on schedule, whenever it was actually read. The
+300ms threshold is unchanged, live inputs still compare system dates, and
+a stream going backward is still a discontinuity.
 ---
- src/clock/input_clock.c      |   4 +
+ src/clock/input_clock.c      |  16 ++-
  test/Makefile.am             |   5 +
- test/src/clock/input_clock.c | 194 +++++++++++++++++++++++++++++++++++
+ test/src/clock/input_clock.c | 205 +++++++++++++++++++++++++++++++++++
  test/src/meson.build         |  10 ++
- 4 files changed, 213 insertions(+)
+ 4 files changed, 235 insertions(+), 1 deletion(-)
  create mode 100644 test/src/clock/input_clock.c
 
 diff --git a/src/clock/input_clock.c b/src/clock/input_clock.c
-index 01d873b679..c791d50fa9 100644
+index 01d873b679..b09c780f6c 100644
 --- a/src/clock/input_clock.c
 +++ b/src/clock/input_clock.c
-@@ -279,6 +279,10 @@ vlc_tick_t input_clock_Update( input_clock_t *cl,
-         /* Feed synchro with a new reference point. */
-         cl->b_has_reference = true;
-         cl->ref = clock_point_Create(i_ck_system, i_ck_stream);
-+
-+        /* The new reference makes the next PCR due already, so a paced input
-+         * reads it straight away: its system date says nothing of the gap. */
-+        cl->b_origin_changed = b_can_pace_control;
-     }
+@@ -113,6 +113,8 @@ struct input_clock_t
+     /* Last point
+      * It is used to detect unexpected stream discontinuities */
+     clock_point_t last;
++    /* Stream date of the point before it, since the reference */
++    vlc_tick_t prev_stream;
  
-     /* Compute the drift between the stream clock and the system clock
+     /* Amount of extra buffering expressed in stream clock */
+     vlc_tick_t i_buffering_duration;
+@@ -178,6 +180,7 @@ input_clock_t *input_clock_New(struct vlc_logger *logger, float rate)
+     cl->ref = clock_point_Create( VLC_TICK_INVALID, VLC_TICK_INVALID );
+ 
+     cl->last = clock_point_Create( VLC_TICK_INVALID, VLC_TICK_INVALID );
++    cl->prev_stream = VLC_TICK_INVALID;
+ 
+     cl->i_buffering_duration = 0;
+ 
+@@ -246,7 +249,16 @@ vlc_tick_t input_clock_Update( input_clock_t *cl,
+         /* We need compare both stream and system times for discontinuity.
+          * Indeed, a big stream diff is OK if we have the same system diff. */
+         vlc_tick_t stream_diff = i_ck_stream - cl->last.stream;
+-        vlc_tick_t system_diff = (i_ck_system - cl->last.system) * cl->rate;
++        vlc_tick_t system_diff;
++        if (!b_can_pace_control)
++            system_diff = (i_ck_system - cl->last.system) * cl->rate;
++        else if (cl->prev_stream != VLC_TICK_INVALID)
++            /* A paced input reads on once the last PCR is due, or at once when
++             * it is behind: on schedule its system date moves by the last step,
++             * and the date it actually got there says nothing of the stream. */
++            system_diff = cl->last.stream - cl->prev_stream;
++        else
++            system_diff = stream_diff;
+         vlc_tick_t diff = stream_diff - system_diff;
+ 
+         /* A discontinuity happen if stream timings increase much more than
+@@ -311,6 +323,7 @@ vlc_tick_t input_clock_Update( input_clock_t *cl,
+     //fprintf( stderr, "input_clock_Update: %d :: %lld\n", b_extra_buffering_allowed, cl->i_buffering_duration/1000 );
+ 
+     /* */
++    cl->prev_stream = b_reset_reference ? VLC_TICK_INVALID : cl->last.stream;
+     cl->last = clock_point_Create( i_ck_system, i_ck_stream );
+ 
+     /* It does not take the decoder latency into account but it is not really
+@@ -337,6 +350,7 @@ void input_clock_Reset( input_clock_t *cl )
+     cl->b_origin_changed = false;
+     cl->ref = cl->last
+         = clock_point_Create( VLC_TICK_INVALID, VLC_TICK_INVALID );
++    cl->prev_stream = VLC_TICK_INVALID;
+ 
+     if (cl->listener.cbs != NULL && cl->listener.cbs->reset != NULL)
+         cl->listener.cbs->reset(cl->listener.opaque);
 diff --git a/test/Makefile.am b/test/Makefile.am
 index c0d12a21a3..98cf138001 100644
 --- a/test/Makefile.am
@@ -73,10 +114,10 @@ index c0d12a21a3..98cf138001 100644
  test_src_misc_ancillary_LDADD = $(LIBVLCCORE) $(LIBVLC)
 diff --git a/test/src/clock/input_clock.c b/test/src/clock/input_clock.c
 new file mode 100644
-index 0000000000..2bab1d3f14
+index 0000000000..011837f98c
 --- /dev/null
 +++ b/test/src/clock/input_clock.c
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,205 @@
 +/*****************************************************************************
 + * clock/input_clock.c: test for the input clock discontinuity detection
 + *****************************************************************************
@@ -123,6 +164,9 @@ index 0000000000..2bab1d3f14
 +    vlc_tick_t jump;
 +    /* PCR spacing from jump_at on, when it changes. */
 +    vlc_tick_t later_interval;
++    /* The input blocking for a while before that PCR, as on a slow server. */
++    unsigned stall_at;
++    vlc_tick_t stall;
 +    unsigned expected_discontinuities;
 +};
 +
@@ -173,6 +217,8 @@ index 0000000000..2bab1d3f14
 +                system = wakeup;
 +        }
 +        system += s->demux_cost;
++        if (i == s->stall_at)
++            system += s->stall;
 +        if (s->later_interval && i >= s->jump_at)
 +            stream += s->later_interval;
 +        else
@@ -193,6 +239,13 @@ index 0000000000..2bab1d3f14
 +        .name = "paced input, PCRs further apart than the gap",
 +        .paced = true, .pcr_count = 200,
 +        .pcr_interval = VLC_TICK_FROM_MS(360), .demux_cost = VLC_TICK_FROM_MS(37),
++        .expected_discontinuities = 0,
++    },
++    {
++        .name = "paced input, PCRs further apart than the gap, read late",
++        .paced = true, .pcr_count = 200,
++        .pcr_interval = VLC_TICK_FROM_MS(360), .demux_cost = VLC_TICK_FROM_MS(37),
++        .stall_at = 50, .stall = VLC_TICK_FROM_SEC(2),
 +        .expected_discontinuities = 0,
 +    },
 +    {
@@ -237,11 +290,10 @@ index 0000000000..2bab1d3f14
 +        .expected_discontinuities = 1,
 +    },
 +    {
-+        /* Every PCR but the one read on from the buffering's reference. */
 +        .name = "live input, stream outrunning the sender's pace",
 +        .paced = false, .pcr_count = 10,
 +        .pcr_interval = VLC_TICK_FROM_MS(360), .demux_cost = VLC_TICK_FROM_MS(37),
-+        .expected_discontinuities = 8,
++        .expected_discontinuities = 9,
 +    },
 +};
 +
@@ -256,7 +308,7 @@ index 0000000000..2bab1d3f14
 +        bool ok = run.discontinuities == s->expected_discontinuities;
 +        /* A paced input reads ahead of real time by one PCR and its extra
 +         * buffering at most. */
-+        if (s->paced && s->expected_discontinuities == 0)
++        if (s->paced && s->expected_discontinuities == 0 && s->stall == 0)
 +            ok &= run.stream_elapsed - run.system_elapsed
 +                  <= s->pcr_interval + VLC_TICK_FROM_MS(100);
 +
