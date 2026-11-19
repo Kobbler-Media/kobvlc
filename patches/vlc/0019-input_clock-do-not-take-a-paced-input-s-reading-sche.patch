@@ -1,0 +1,285 @@
+From 7a0f3871ae7e791a7f27aa20ae3b6a904ce86c6e Mon Sep 17 00:00:00 2001
+Message-Id: <7a0f3871ae7e791a7f27aa20ae3b6a904ce86c6e.1795056216.git.dev@kobbler.invalid>
+From: Kobbler-Media <dev@kobbler.invalid>
+Date: Thu, 19 Nov 2026 13:27:44 +1100
+Subject: [PATCH] input_clock: do not take a paced input's reading schedule for
+ a gap
+
+The gap check compares how far the stream moved between two PCRs with how
+far the system date moved. For a live source the system date is when the
+sender's data arrived. For an input VLC paces itself (a file, HTTP) it is
+only the input's own reading schedule: the input reads up to the clock's
+wake-up date and on to the next PCR, so a PCR is read as soon as the
+previous one was due.
+
+A demuxer whose PCRs are more than 300ms apart therefore trips the check
+as soon as it falls behind once. The reset puts the reference at the PCR
+just read, so the next wake-up is already due, the next PCR is read at
+once and trips the check again. Every PCR then starts a new output clock
+context. A Matroska episode whose credits put 360ms between PCRs played
+its position nearly twice as fast as real time from the cut into them,
+40s ahead of the picture within a minute.
+
+For a paced input, a gap is now a step of more than a second, which no
+demuxer spaces its PCRs by: the player's discontinuity test still sees
+its 2.1s and 7s jumps. Live sources keep the 300ms check, and a stream
+going backward is still a discontinuity either way.
+---
+ src/clock/input_clock.c      |   8 +-
+ test/Makefile.am             |   5 +
+ test/src/clock/input_clock.c | 172 +++++++++++++++++++++++++++++++++++
+ test/src/meson.build         |  10 ++
+ 4 files changed, 194 insertions(+), 1 deletion(-)
+ create mode 100644 test/src/clock/input_clock.c
+
+diff --git a/src/clock/input_clock.c b/src/clock/input_clock.c
+index 01d873b679..76d6160d40 100644
+--- a/src/clock/input_clock.c
++++ b/src/clock/input_clock.c
+@@ -85,6 +85,11 @@
+ 
+ #define CR_MAX_GAP CR_MEAN_PTS_GAP
+ 
++/* A paced input reads on as soon as its clock lets it, so the system date of
++ * a PCR can be barely past the last one's whatever the stream moved by: only a
++ * step longer than any demuxer spaces its PCRs is a gap. */
++#define CR_MAX_PACED_GAP VLC_TICK_FROM_SEC(1)
++
+ /* Rate (in 1/256) at which we will read faster to try to increase our
+  * internal buffer (if we control the pace of the source).
+  */
+@@ -252,7 +257,8 @@ vlc_tick_t input_clock_Update( input_clock_t *cl,
+         /* A discontinuity happen if stream timings increase much more than
+          * system timings or if the stream is going backward.
+          * Don't compare system timings if the origin has just been changed */
+-        if ((!cl->b_origin_changed && diff > CR_MAX_GAP) || stream_diff < 0)
++        vlc_tick_t max_gap = b_can_pace_control ? CR_MAX_PACED_GAP : CR_MAX_GAP;
++        if ((!cl->b_origin_changed && diff > max_gap) || stream_diff < 0)
+         {
+             /* Stream discontinuity, for which we haven't received a
+              * warning from the stream control facilities (dd-edited
+diff --git a/test/Makefile.am b/test/Makefile.am
+index c0d12a21a3..98cf138001 100644
+--- a/test/Makefile.am
++++ b/test/Makefile.am
+@@ -53,6 +53,7 @@ check_PROGRAMS = \
+ 	test_src_config_chain \
+ 	test_src_clock_clock \
+ 	test_src_clock_start \
++	test_src_clock_input_clock \
+ 	test_src_misc_ancillary \
+ 	test_src_misc_variables \
+ 	test_src_input_stream \
+@@ -237,6 +238,10 @@ test_src_clock_start_SOURCES = src/clock/clock_start.c \
+ 	../src/clock/clock.c \
+ 	../src/clock/clock_internal.c
+ test_src_clock_start_LDADD = $(LIBVLCCORE) $(LIBVLC)
++test_src_clock_input_clock_SOURCES = src/clock/input_clock.c \
++	../src/clock/input_clock.c \
++	../src/clock/clock_internal.c
++test_src_clock_input_clock_LDADD = $(LIBVLCCORE)
+ 
+ test_src_misc_ancillary_SOURCES = src/misc/ancillary.c
+ test_src_misc_ancillary_LDADD = $(LIBVLCCORE) $(LIBVLC)
+diff --git a/test/src/clock/input_clock.c b/test/src/clock/input_clock.c
+new file mode 100644
+index 0000000000..83181e5474
+--- /dev/null
++++ b/test/src/clock/input_clock.c
+@@ -0,0 +1,172 @@
++/*****************************************************************************
++ * clock/input_clock.c: test for the input clock discontinuity detection
++ *****************************************************************************
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU Lesser General Public License as published by
++ * the Free Software Foundation; either version 2.1 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
++ * GNU Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
++ *****************************************************************************/
++
++#ifdef HAVE_CONFIG_H
++# include "config.h"
++#endif
++
++#undef NDEBUG
++#include <assert.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++#include <vlc_common.h>
++#include <vlc_tick.h>
++
++#include "../../../src/clock/input_clock.h"
++
++const char vlc_module_name[] = "test_input_clock";
++
++struct scenario
++{
++    const char *name;
++    bool paced;
++    unsigned pcr_count;
++    vlc_tick_t pcr_interval;
++    /* Time the demuxer takes from one PCR to the next, once it is due to read. */
++    vlc_tick_t demux_cost;
++    unsigned jump_at;
++    vlc_tick_t jump;
++    unsigned expected_discontinuities;
++};
++
++struct run
++{
++    unsigned discontinuities;
++    vlc_tick_t stream_elapsed;
++    vlc_tick_t system_elapsed;
++};
++
++static vlc_tick_t
++on_update(void *opaque, vlc_tick_t ck_system, vlc_tick_t ck_stream,
++          double rate, bool discontinuity)
++{
++    (void) ck_system; (void) ck_stream; (void) rate;
++    struct run *run = opaque;
++    if (discontinuity)
++        run->discontinuities++;
++    return 0;
++}
++
++static const struct vlc_input_clock_cbs cbs = {
++    .update = on_update,
++};
++
++/* A paced input sleeps until the clock's wake-up date before demuxing on, as
++ * the input thread does; a live one receives each PCR at its own pace. */
++static struct run
++play(const struct scenario *s)
++{
++    struct run run = { 0 };
++    input_clock_t *clock = input_clock_New(NULL, 1.f);
++    assert(clock != NULL);
++    input_clock_AttachListener(clock, &cbs, &run);
++
++    const vlc_tick_t system_start = VLC_TICK_FROM_SEC(1000);
++    const vlc_tick_t stream_start = VLC_TICK_FROM_SEC(2451);
++    vlc_tick_t system = system_start;
++    vlc_tick_t stream = stream_start;
++
++    input_clock_Update(clock, s->paced, true, false, stream, system);
++    for (unsigned i = 1; i < s->pcr_count; i++)
++    {
++        if (s->paced)
++        {
++            vlc_tick_t wakeup = input_clock_GetWakeup(clock);
++            if (wakeup > system)
++                system = wakeup;
++        }
++        system += s->demux_cost;
++        stream += s->pcr_interval;
++        if (i == s->jump_at)
++            stream += s->jump;
++        input_clock_Update(clock, s->paced, false, false, stream, system);
++    }
++
++    run.stream_elapsed = stream - stream_start;
++    run.system_elapsed = system - system_start;
++    input_clock_Delete(clock);
++    return run;
++}
++
++static const struct scenario scenarios[] = {
++    {
++        .name = "paced input, PCRs further apart than the gap",
++        .paced = true, .pcr_count = 200,
++        .pcr_interval = VLC_TICK_FROM_MS(360), .demux_cost = VLC_TICK_FROM_MS(37),
++        .expected_discontinuities = 0,
++    },
++    {
++        .name = "paced input, PCRs most of a second apart",
++        .paced = true, .pcr_count = 60,
++        .pcr_interval = VLC_TICK_FROM_MS(900), .demux_cost = VLC_TICK_FROM_MS(37),
++        .expected_discontinuities = 0,
++    },
++    {
++        .name = "paced input, stream jumping forward",
++        .paced = true, .pcr_count = 200,
++        .pcr_interval = VLC_TICK_FROM_MS(40), .demux_cost = VLC_TICK_FROM_MS(2),
++        .jump_at = 100, .jump = VLC_TICK_FROM_SEC(2),
++        .expected_discontinuities = 1,
++    },
++    {
++        .name = "paced input, stream going backward",
++        .paced = true, .pcr_count = 200,
++        .pcr_interval = VLC_TICK_FROM_MS(40), .demux_cost = VLC_TICK_FROM_MS(2),
++        .jump_at = 100, .jump = -VLC_TICK_FROM_SEC(30),
++        .expected_discontinuities = 1,
++    },
++    {
++        .name = "live input, stream jumping forward",
++        .paced = false, .pcr_count = 200,
++        .pcr_interval = VLC_TICK_FROM_MS(40), .demux_cost = VLC_TICK_FROM_MS(40),
++        .jump_at = 100, .jump = VLC_TICK_FROM_SEC(1),
++        .expected_discontinuities = 1,
++    },
++    {
++        .name = "live input, stream outrunning the sender's pace",
++        .paced = false, .pcr_count = 10,
++        .pcr_interval = VLC_TICK_FROM_MS(360), .demux_cost = VLC_TICK_FROM_MS(37),
++        .expected_discontinuities = 9,
++    },
++};
++
++int main(void)
++{
++    int failures = 0;
++    for (size_t i = 0; i < ARRAY_SIZE(scenarios); i++)
++    {
++        const struct scenario *s = &scenarios[i];
++        struct run run = play(s);
++
++        bool ok = run.discontinuities == s->expected_discontinuities;
++        /* Whatever it reads, a paced input must not read ahead of real time. */
++        if (s->paced && s->jump == 0)
++            ok &= run.stream_elapsed - run.system_elapsed < VLC_TICK_FROM_SEC(1);
++
++        fprintf(stderr, "%s: %s: %u discontinuities (expected %u), "
++                "%"PRId64" ms of stream in %"PRId64" ms\n",
++                ok ? "ok" : "FAIL", s->name, run.discontinuities,
++                s->expected_discontinuities,
++                MS_FROM_VLC_TICK(run.stream_elapsed),
++                MS_FROM_VLC_TICK(run.system_elapsed));
++        if (!ok)
++            failures++;
++    }
++    return failures ? EXIT_FAILURE : EXIT_SUCCESS;
++}
+diff --git a/test/src/meson.build b/test/src/meson.build
+index 6f1569f5e9..205b66dcbf 100644
+--- a/test/src/meson.build
++++ b/test/src/meson.build
+@@ -45,6 +45,16 @@ vlc_tests += {
+     'link_with' : [libvlc, libvlccore],
+ }
+ 
++vlc_tests += {
++    'name' : 'test_src_clock_input_clock',
++    'sources' : files(
++        'clock/input_clock.c',
++        '../../src/clock/input_clock.c',
++        '../../src/clock/clock_internal.c'),
++    'suite' : ['src', 'test_src'],
++    'link_with' : [libvlccore],
++}
++
+ vlc_tests += {
+     'name' : 'test_src_audio_output_dec',
+     'sources' : files(
+-- 
+2.56.1
+
